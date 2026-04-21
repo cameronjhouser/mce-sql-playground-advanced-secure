@@ -42,17 +42,13 @@ var AUDIT_DE_KEY = "AcademyMCEPlayground_QueryAudit";
 var SECURITY_REQUIRE_ACCESS_POLICY = false;
 var SECURITY_TEMP_PREFIXES = ["QP_SRC_", "QP_RES_"];
 var SECURITY_DEFAULT_BLOCKED_FIELDS = ["password", "ssn", "socialsecurity", "token", "secret", "apikey", "api_key"];
+var SECURITY_OAUTH_CONFIG_DE_KEY = "AcademyMCEPlayground_OAuthConfig";
+var SECURITY_OAUTH_CONFIG_ROW_KEY = "DEFAULT";
 var SECURITY_OAUTH_SESSION_DE_KEY = "AcademyMCEPlayground_OAuthSessions";
 
 // Reliable Marketing Cloud user login.
-// Create an Installed Package > API Integration > Web App, then fill these in on the CloudPage copy.
-// Keep the client secret server-side only. Do not expose it in browser JavaScript.
-var SECURITY_OAUTH_ENABLED = false;
-var SECURITY_OAUTH_TENANT_SUBDOMAIN = ""; // Example: mcx3g7dtegr6hh7y5h7grhrgr97n
-var SECURITY_OAUTH_CLIENT_ID = "";
-var SECURITY_OAUTH_CLIENT_SECRET = "";
-var SECURITY_OAUTH_REDIRECT_URI = ""; // Full published CloudPage URL, without ?api=1
-var SECURITY_OAUTH_SESSION_MINUTES = 480;
+// Create an Installed Package > API Integration > Web App, then store values in
+// AcademyMCEPlayground_OAuthConfig. The client secret should not live in this page source.
 var SECURITY_OAUTH_COOKIE_NAME = "AcademyMCEPlaygroundSession";
 var SECURITY_OAUTH_STATE_COOKIE_NAME = "AcademyMCEPlaygroundState";
 
@@ -65,13 +61,75 @@ function isTruthySecurityValue(value) {
 }
 
 function isOAuthLoginEnabled() {
+  var config = getOAuthConfig();
   return !!(
-    SECURITY_OAUTH_ENABLED &&
-    ssjsTrim(SECURITY_OAUTH_TENANT_SUBDOMAIN) &&
-    ssjsTrim(SECURITY_OAUTH_CLIENT_ID) &&
-    ssjsTrim(SECURITY_OAUTH_CLIENT_SECRET) &&
-    ssjsTrim(SECURITY_OAUTH_REDIRECT_URI)
+    config.enabled &&
+    ssjsTrim(config.tenantSubdomain) &&
+    ssjsTrim(config.clientId) &&
+    ssjsTrim(config.clientSecret) &&
+    ssjsTrim(config.redirectUri)
   );
+}
+
+function getOAuthConfigFieldDefinitions() {
+  return [
+    { Name: "ConfigKey", FieldType: "Text", MaxLength: 50, IsRequired: true, IsPrimaryKey: true },
+    { Name: "OAuthEnabled", FieldType: "Boolean", IsRequired: false },
+    { Name: "TenantSubdomain", FieldType: "Text", MaxLength: 100, IsRequired: false },
+    { Name: "ClientID", FieldType: "Text", MaxLength: 254, IsRequired: false },
+    { Name: "ClientSecret", FieldType: "Text", MaxLength: 500, IsRequired: false },
+    { Name: "RedirectURI", FieldType: "Text", MaxLength: 1000, IsRequired: false },
+    { Name: "SessionMinutes", FieldType: "Number", IsRequired: false }
+  ];
+}
+
+function ensureOAuthConfigDataExtension() {
+  var existing = getDeMetaByName(SECURITY_OAUTH_CONFIG_DE_KEY);
+  if (existing && existing.CustomerKey) return existing.CustomerKey;
+
+  var prox = new Script.Util.WSProxy();
+  var folderId = ensurePlaygroundFolderId();
+  prox.createItem("DataExtension", {
+    CustomerKey: SECURITY_OAUTH_CONFIG_DE_KEY,
+    Name: SECURITY_OAUTH_CONFIG_DE_KEY,
+    Description: "Server-side OAuth configuration for Academy MCE SQL Playground. Store Installed Package Web App values here.",
+    CategoryID: folderId,
+    IsSendable: false,
+    Fields: getOAuthConfigFieldDefinitions()
+  });
+  return SECURITY_OAUTH_CONFIG_DE_KEY;
+}
+
+function getOAuthConfig() {
+  if (typeof getOAuthConfig._cache !== "undefined") return getOAuthConfig._cache;
+
+  var config = {
+    exists: false,
+    enabled: false,
+    tenantSubdomain: "",
+    clientId: "",
+    clientSecret: "",
+    redirectUri: "",
+    sessionMinutes: 480
+  };
+
+  try {
+    var configKey = ensureOAuthConfigDataExtension();
+    var rows = Platform.Function.LookupRows(configKey, "ConfigKey", SECURITY_OAUTH_CONFIG_ROW_KEY) || [];
+    if (rows.length) {
+      var row = rows[0];
+      config.exists = true;
+      config.enabled = isTruthySecurityValue(row.OAuthEnabled);
+      config.tenantSubdomain = ssjsTrim(row.TenantSubdomain || "");
+      config.clientId = ssjsTrim(row.ClientID || "");
+      config.clientSecret = ssjsTrim(row.ClientSecret || "");
+      config.redirectUri = ssjsTrim(row.RedirectURI || "");
+      config.sessionMinutes = Number(row.SessionMinutes || 480) || 480;
+    }
+  } catch (e) {}
+
+  getOAuthConfig._cache = config;
+  return config;
 }
 
 function addMinutesUtc(minutes) {
@@ -123,11 +181,12 @@ function expireSessionCookie(name) {
 }
 
 function buildOAuthAuthorizeUrl(state) {
-  var base = "https://" + ssjsTrim(SECURITY_OAUTH_TENANT_SUBDOMAIN) + ".auth.marketingcloudapis.com/v2/authorize";
+  var config = getOAuthConfig();
+  var base = "https://" + ssjsTrim(config.tenantSubdomain) + ".auth.marketingcloudapis.com/v2/authorize";
   return base +
     "?response_type=code" +
-    "&client_id=" + encodeURIComponent(ssjsTrim(SECURITY_OAUTH_CLIENT_ID)) +
-    "&redirect_uri=" + encodeURIComponent(ssjsTrim(SECURITY_OAUTH_REDIRECT_URI)) +
+    "&client_id=" + encodeURIComponent(ssjsTrim(config.clientId)) +
+    "&redirect_uri=" + encodeURIComponent(ssjsTrim(config.redirectUri)) +
     "&state=" + encodeURIComponent(state);
 }
 
@@ -199,13 +258,14 @@ function ensureOAuthSessionDataExtension() {
 }
 
 function exchangeOAuthCode(code) {
-  var tokenUrl = "https://" + ssjsTrim(SECURITY_OAUTH_TENANT_SUBDOMAIN) + ".auth.marketingcloudapis.com/v2/token";
+  var config = getOAuthConfig();
+  var tokenUrl = "https://" + ssjsTrim(config.tenantSubdomain) + ".auth.marketingcloudapis.com/v2/token";
   var payload = {
     grant_type: "authorization_code",
     code: code,
-    client_id: ssjsTrim(SECURITY_OAUTH_CLIENT_ID),
-    client_secret: ssjsTrim(SECURITY_OAUTH_CLIENT_SECRET),
-    redirect_uri: ssjsTrim(SECURITY_OAUTH_REDIRECT_URI)
+    client_id: ssjsTrim(config.clientId),
+    client_secret: ssjsTrim(config.clientSecret),
+    redirect_uri: ssjsTrim(config.redirectUri)
   };
   var response = HTTP.Post(tokenUrl, "application/json", Platform.Function.Stringify(payload), [], []);
   var body = response && response.Response ? String(response.Response[0] || "") : "";
@@ -222,7 +282,7 @@ function storeOAuthSession(tokenResponse) {
   try { buId = Platform.Function.AccountID(); } catch (e1) {}
   var sessionKey = ensureOAuthSessionDataExtension();
   var sessionDe = DataExtension.Init(sessionKey);
-  var expiresDate = addMinutesUtc(SECURITY_OAUTH_SESSION_MINUTES);
+  var expiresDate = addMinutesUtc(getOAuthConfig().sessionMinutes);
 
   sessionDe.Rows.Add({
     SessionID: sessionId,
@@ -266,7 +326,7 @@ function handleOAuthPageRequest() {
   var logout = Platform.Request.GetQueryStringParameter("logout");
   if (logout == "1") {
     expireSessionCookie(SECURITY_OAUTH_COOKIE_NAME);
-    Platform.Response.Redirect(ssjsTrim(SECURITY_OAUTH_REDIRECT_URI));
+    Platform.Response.Redirect(ssjsTrim(getOAuthConfig().redirectUri));
   }
 
   var code = Platform.Request.GetQueryStringParameter("code");
@@ -280,7 +340,7 @@ function handleOAuthPageRequest() {
     }
     try {
       storeOAuthSession(exchangeOAuthCode(code));
-      Platform.Response.Redirect(ssjsTrim(SECURITY_OAUTH_REDIRECT_URI));
+      Platform.Response.Redirect(ssjsTrim(getOAuthConfig().redirectUri));
     } catch (oauthErr) {
       Variable.SetValue("@oauthError", "OAuth token exchange failed. Check the Installed Package client ID, client secret, tenant subdomain, and redirect URI.");
     }
