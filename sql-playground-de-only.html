@@ -77,12 +77,19 @@ function isValidOAuthTenantSubdomain(value) {
   return !!(text && !/^\d+$/.test(text) && /^[a-z0-9-]+$/i.test(text) && text.indexOf(".") < 0);
 }
 
+function normalizeOAuthTenantSubdomain(value) {
+  var text = ssjsTrim(value || "").toLowerCase();
+  text = text.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  text = text.replace(/\.(auth|rest|soap)\.marketingcloudapis\.com$/i, "");
+  return ssjsTrim(text);
+}
+
 function getOAuthConfigProblem() {
   var config = getOAuthConfig();
   if (!config.exists) return "OAuth config row missing. Add ConfigKey=DEFAULT to " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
   if (!config.enabled) return "";
   if (!isValidOAuthTenantSubdomain(config.tenantSubdomain)) {
-    return "TenantSubdomain is invalid. Use the Installed Package tenant subdomain from the REST Base URI, not the MID. Example: mcx3g7dtegr6hh7y5h7grhrgr97n.";
+    return "TenantSubdomain is invalid. Enter only the tenant subdomain from the Installed Package REST Base URI, not the full URL or MID. Example: mcx3g7dtegr6hh7y5h7grhrgr97n.";
   }
   if (!ssjsTrim(config.clientId)) return "ClientID is missing in " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
   if (!ssjsTrim(config.clientSecret)) return "ClientSecret is missing in " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
@@ -139,7 +146,7 @@ function getOAuthConfig() {
       var row = rows[0];
       config.exists = true;
       config.enabled = isTruthySecurityValue(row.OAuthEnabled);
-      config.tenantSubdomain = ssjsTrim(row.TenantSubdomain || "");
+      config.tenantSubdomain = normalizeOAuthTenantSubdomain(row.TenantSubdomain || "");
       config.clientId = ssjsTrim(row.ClientID || "");
       config.clientSecret = ssjsTrim(row.ClientSecret || "");
       config.redirectUri = ssjsTrim(row.RedirectURI || "");
