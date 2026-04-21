@@ -1282,7 +1282,8 @@ if (isApiRequest) {
       emailAddress: authContext.emailAddress || "",
       userDisplayName: authContext.userDisplayName || "",
       policyMatchCount: authPolicies ? authPolicies.length : 0,
-      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || authContext.runnerId) : "Not logged in - Limited Access"
+      hasDisplayIdentity: !!(authContext.userDisplayName || authContext.userName || authContext.emailAddress),
+      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "User details missing") : "Not logged in - Limited Access"
     }));
   } else if (body.action === "debugLookupDe") {
     try {
@@ -3448,16 +3449,17 @@ async function loadAuthStatus() {
     const response = await postApi({ action: 'authStatus' });
     const data = response.json && response.json.ok ? response.json.data : null;
     if (data && data.authenticated) {
-      const displayLabel = data.userDisplayName || data.userName || data.emailAddress || 'Authorized user';
+      const hasDisplayIdentity = !!(data.userDisplayName || data.userName || data.emailAddress);
+      const displayLabel = data.userDisplayName || data.userName || data.emailAddress || 'User details missing';
       badge.textContent = `Logged in: ${displayLabel}`;
       badge.title = [
+        !hasDisplayIdentity ? 'Access policy matched, but UserDisplayName, UserName, and EmailAddress are blank.' : '',
         data.userDisplayName ? `Display name: ${data.userDisplayName}` : '',
         data.userName ? `Username: ${data.userName}` : '',
         data.emailAddress ? `Email: ${data.emailAddress}` : '',
-        data.runnerId ? `Member ID: ${data.runnerId}` : '',
         data.businessUnitId ? `BU: ${data.businessUnitId}` : ''
       ].filter(Boolean).join('\n');
-      badge.classList.remove('limited');
+      badge.classList.toggle('limited', !hasDisplayIdentity);
     } else {
       badge.textContent = 'Not logged in - Limited Access';
       badge.title = 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require login.';
