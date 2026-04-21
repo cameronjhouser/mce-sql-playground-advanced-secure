@@ -37,6 +37,210 @@ function trimBrackets(value) {
   return String(value || "").replace(/^\[/, "").replace(/\]$/, "");
 }
 
+var SECURITY_POLICY_DE_KEY = "AcademyMCEPlayground_AccessPolicy";
+var SECURITY_REQUIRE_ACCESS_POLICY = false;
+var SECURITY_TEMP_PREFIXES = ["QP_SRC_", "QP_RES_"];
+var SECURITY_DEFAULT_BLOCKED_FIELDS = ["password", "ssn", "socialsecurity", "token", "secret", "apikey", "api_key"];
+
+function normalizeSecurityValue(value) {
+  return ssjsTrim(String(value == null ? "" : value)).toLowerCase();
+}
+
+function isTruthySecurityValue(value) {
+  return /^(true|yes|y|1)$/i.test(ssjsTrim(String(value == null ? "" : value)));
+}
+
+function getCurrentSecurityContext() {
+  var runnerId = null;
+  var buId = null;
+  try { runnerId = Platform.Function.AuthenticatedMemberID(); } catch (e1) {}
+  try { buId = Platform.Function.AccountID(); } catch (e2) {}
+  return {
+    runnerId: runnerId || "Unknown",
+    businessUnitId: buId || "Unknown"
+  };
+}
+
+function validateReadOnlySql(sqlText) {
+  var cleaned = String(sqlText || "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--.*$/gm, " ")
+    .replace(/^\s+|\s+$/g, "");
+  var withoutTrailingSemicolon = cleaned.replace(/;\s*$/, "");
+
+  if (!/^\s*select\b/i.test(cleaned)) {
+    return { ok: false, message: "Only SELECT queries are allowed." };
+  }
+  if (withoutTrailingSemicolon.indexOf(";") >= 0) {
+    return { ok: false, message: "Only one SQL statement is allowed." };
+  }
+  if (/\b(insert|update|delete|drop|truncate|merge|alter|create|execute|exec|into)\b/i.test(cleaned)) {
+    return { ok: false, message: "Write, DDL, and multi-purpose SQL keywords are blocked in the playground." };
+  }
+  for (var i = 0; i < SECURITY_DEFAULT_BLOCKED_FIELDS.length; i++) {
+    var blocked = SECURITY_DEFAULT_BLOCKED_FIELDS[i];
+    var escapedBlocked = blocked.replace(/([.*+?^${}()|\[\]\/\\])/g, "\\$1");
+    var re = new RegExp("(^|[^a-z0-9_])" + escapedBlocked + "([^a-z0-9_]|$)", "i");
+    if (re.test(cleaned)) {
+      return { ok: false, message: "Query references a blocked sensitive field or token: " + blocked };
+    }
+  }
+  return { ok: true };
+}
+
+function extractSqlObjectReferences(sqlText) {
+  var cleaned = String(sqlText || "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--.*$/gm, " ");
+  var refs = [];
+  var re = /\b(?:from|join)\s+((?:ENT\.)?\[[^\]]+\]|(?:ENT\.)?[A-Za-z_][A-Za-z0-9_]*|_[A-Za-z][A-Za-z0-9_]*)/gi;
+  var match;
+  while ((match = re.exec(cleaned)) !== null) {
+    var raw = ssjsTrim(match[1]);
+    var isEnt = /^ENT\./i.test(raw);
+    var name = raw.replace(/^ENT\./i, "");
+    name = trimBrackets(name);
+    refs.push({
+      raw: raw,
+      name: name,
+      isEnt: isEnt,
+      isDataView: /^_/.test(name),
+      isTemp: isTempSecurityObject(name)
+    });
+  }
+  return refs;
+}
+
+function isTempSecurityObject(name) {
+  var value = String(name || "");
+  for (var i = 0; i < SECURITY_TEMP_PREFIXES.length; i++) {
+    if (value.indexOf(SECURITY_TEMP_PREFIXES[i]) === 0) return true;
+  }
+  return false;
+}
+
+function wildcardToRegExp(pattern) {
+  var text = String(pattern || "*");
+  var escaped = text.replace(/([.*+?^${}()|\[\]\/\\])/g, "\\$1").replace(/\\\*/g, ".*");
+  return new RegExp("^" + escaped + "$", "i");
+}
+
+function getSecurityPolicyRows() {
+  try {
+    var de = getDeMetaByName(SECURITY_POLICY_DE_KEY);
+    if (!de || !de.CustomerKey) return null;
+    return retrieveDeRowsViaWSProxy(de.CustomerKey, [
+      "UserKey",
+      "EmailAddress",
+      "AllowedMID",
+      "AllowedFolderName",
+      "AllowedDEPattern",
+      "CanUseENT",
+      "CanUseDataViews",
+      "IsAdmin",
+      "Active"
+    ]);
+  } catch (e) {
+    return null;
+  }
+}
+
+function getMatchingSecurityPolicies(context) {
+  var rows = getSecurityPolicyRows();
+  if (!rows || !rows.length) return null;
+
+  var matches = [];
+  var runner = normalizeSecurityValue(context.runnerId);
+  var bu = normalizeSecurityValue(context.businessUnitId);
+
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    if (!isTruthySecurityValue(row.Active)) continue;
+    var rowUser = normalizeSecurityValue(row.UserKey);
+    var rowMid = normalizeSecurityValue(row.AllowedMID);
+    var userMatches = !rowUser || rowUser === "*" || rowUser === runner;
+    var midMatches = !rowMid || rowMid === "*" || rowMid === bu;
+    if (userMatches && midMatches) matches.push(row);
+  }
+  return matches;
+}
+
+function policyAllowsObject(policies, ref, deMeta) {
+  if (!policies || !policies.length) return false;
+  for (var i = 0; i < policies.length; i++) {
+    var policy = policies[i];
+    if (isTruthySecurityValue(policy.IsAdmin)) return true;
+    if (ref.isEnt && !isTruthySecurityValue(policy.CanUseENT)) continue;
+    if (ref.isDataView && !isTruthySecurityValue(policy.CanUseDataViews)) continue;
+
+    var pattern = ssjsTrim(String(policy.AllowedDEPattern || "*"));
+    if (!wildcardToRegExp(pattern).test(ref.name)) continue;
+
+    var allowedFolder = ssjsTrim(String(policy.AllowedFolderName || ""));
+    if (allowedFolder && allowedFolder !== "*") {
+      if (!deMeta || !deMeta.CategoryID) continue;
+      var folder = getDataFolderById(deMeta.CategoryID);
+      if (!folder || normalizeSecurityValue(folder.Name) !== normalizeSecurityValue(allowedFolder)) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+function getDataFolderById(folderId) {
+  try {
+    var prox = new Script.Util.WSProxy();
+    var resp = prox.retrieve("DataFolder", ["ID", "Name", "ContentType"], {
+      Property: "ID",
+      SimpleOperator: "equals",
+      Value: folderId
+    });
+    if (resp && resp.Results && resp.Results.length) return resp.Results[0];
+  } catch (e) {}
+  return null;
+}
+
+function enforceQuerySecurity(sqlText) {
+  var readOnly = validateReadOnlySql(sqlText);
+  if (!readOnly.ok) return readOnly;
+
+  var context = getCurrentSecurityContext();
+  var refs = extractSqlObjectReferences(sqlText);
+  var policies = getMatchingSecurityPolicies(context);
+
+  if (SECURITY_REQUIRE_ACCESS_POLICY && (!policies || !policies.length)) {
+    return {
+      ok: false,
+      message: "No active playground access policy was found for this user and Business Unit.",
+      context: context
+    };
+  }
+
+  for (var i = 0; i < refs.length; i++) {
+    var ref = refs[i];
+    if (ref.isTemp) continue;
+
+    if (policies && policies.length) {
+      var deMeta = ref.isDataView ? null : getDeMetaByName(ref.name);
+      if (!policyAllowsObject(policies, ref, deMeta)) {
+        return {
+          ok: false,
+          message: "Access blocked by playground policy for object: " + ref.raw,
+          object: ref,
+          context: context
+        };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    context: context,
+    references: refs,
+    policyMode: policies && policies.length ? "policy_enforced" : "read_only_only"
+  };
+}
+
 function parseSimpleDeSql(sql) {
   var normalized = String(sql || "")
     .replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -70,14 +274,14 @@ function parseSimpleDeSql(sql) {
 
 function getDeMetaByName(name) {
   var prox = new Script.Util.WSProxy();
-  var byName = prox.retrieve("DataExtension", ["Name", "CustomerKey", "Description"], {
+  var byName = prox.retrieve("DataExtension", ["Name", "CustomerKey", "Description", "CategoryID"], {
     Property: "Name",
     SimpleOperator: "equals",
     Value: name
   });
   if (byName && byName.Results && byName.Results.length) return byName.Results[0];
 
-  var byKey = prox.retrieve("DataExtension", ["Name", "CustomerKey", "Description"], {
+  var byKey = prox.retrieve("DataExtension", ["Name", "CustomerKey", "Description", "CategoryID"], {
     Property: "CustomerKey",
     SimpleOperator: "equals",
     Value: name
@@ -1092,6 +1296,14 @@ if (isApiRequest) {
       if (!sqlText) {
         Write(apiFail("SQL text is required.", { step: "validate_sql" }));
       } else {
+        var securityCheck = enforceQuerySecurity(sqlText);
+        if (!securityCheck.ok) {
+          Write(apiFail(securityCheck.message || "Query blocked by playground security policy.", {
+            step: "security_policy",
+            context: securityCheck.context || null,
+            object: securityCheck.object || null
+          }));
+        } else {
         var derived = deriveResultColumns(sqlText);
         if (!derived.ok) {
           Write(apiFail(derived.message, {
@@ -1178,6 +1390,11 @@ if (isApiRequest) {
               resultDescription: resultDescription,
               queryDescription: queryDescription,
               auditMetadata: auditMeta,
+              security: {
+                mode: securityCheck.policyMode,
+                context: securityCheck.context,
+                references: securityCheck.references
+              },
               cleanupMetadata: {
                 folderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
                 resultPrefix: "QP_RES_",
@@ -1190,6 +1407,7 @@ if (isApiRequest) {
             }));
           }
           }
+        }
         }
       }
     } catch (submitErr) {
@@ -2847,6 +3065,7 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     const details = submit.json.error?.details || {};
     const parts = [submit.json.error?.message || 'submitQueryDefinitionRun failed.'];
     if (details.step) parts.push(`Step: ${details.step}`);
+    if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
     if (details.retentionErrorMessage) parts.push(`Retention error: ${details.retentionErrorMessage}`);
     if (details.finalCreateErrorMessage) parts.push(`Final create error: ${details.finalCreateErrorMessage}`);
     if (details.resultFolderName) parts.push(`Folder: ${details.resultFolderName}`);
