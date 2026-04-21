@@ -171,9 +171,9 @@ function wildcardToRegExp(pattern) {
 
 function getSecurityPolicyRows() {
   try {
-    var de = getDeMetaByName(SECURITY_POLICY_DE_KEY);
-    if (!de || !de.CustomerKey) return null;
-    return retrieveDeRowsViaWSProxy(de.CustomerKey, [
+    var policyKey = ensureAccessPolicyDataExtension();
+    if (!policyKey) return null;
+    return retrieveDeRowsViaWSProxy(policyKey, [
       "UserKey",
       "UserName",
       "EmailAddress",
@@ -188,6 +188,66 @@ function getSecurityPolicyRows() {
     ]);
   } catch (e) {
     return null;
+  }
+}
+
+function getAccessPolicyFieldDefinitions() {
+  return [
+    { Name: "UserKey", FieldType: "Text", MaxLength: 100, IsRequired: false },
+    { Name: "UserName", FieldType: "Text", MaxLength: 254, IsRequired: false },
+    { Name: "EmailAddress", FieldType: "EmailAddress", MaxLength: 254, IsRequired: false },
+    { Name: "UserDisplayName", FieldType: "Text", MaxLength: 254, IsRequired: false },
+    { Name: "AllowedMID", FieldType: "Text", MaxLength: 50, IsRequired: false },
+    { Name: "AllowedFolderName", FieldType: "Text", MaxLength: 254, IsRequired: false },
+    { Name: "AllowedDEPattern", FieldType: "Text", MaxLength: 254, IsRequired: false },
+    { Name: "CanUseENT", FieldType: "Boolean", IsRequired: false },
+    { Name: "CanUseDataViews", FieldType: "Boolean", IsRequired: false },
+    { Name: "IsAdmin", FieldType: "Boolean", IsRequired: false },
+    { Name: "Active", FieldType: "Boolean", IsRequired: false }
+  ];
+}
+
+function ensureAccessPolicyDataExtension() {
+  var existing = getDeMetaByName(SECURITY_POLICY_DE_KEY);
+  if (existing && existing.CustomerKey) {
+    ensureAccessPolicyDataExtensionFields(existing.CustomerKey);
+    return existing.CustomerKey;
+  }
+
+  var prox = new Script.Util.WSProxy();
+  var folderId = ensurePlaygroundFolderId();
+  prox.createItem("DataExtension", {
+    CustomerKey: SECURITY_POLICY_DE_KEY,
+    Name: SECURITY_POLICY_DE_KEY,
+    Description: "Access policy for Academy MCE SQL Playground. Add active rows here to authorize server-side Query Activity access.",
+    CategoryID: folderId,
+    IsSendable: false,
+    Fields: getAccessPolicyFieldDefinitions()
+  });
+  return SECURITY_POLICY_DE_KEY;
+}
+
+function ensureAccessPolicyDataExtensionFields(policyKey) {
+  var existingFields = {};
+  try {
+    var fields = getDeFieldNames(policyKey);
+    for (var i = 0; i < fields.length; i++) {
+      existingFields[String(fields[i]).toLowerCase()] = true;
+    }
+  } catch (e) {
+    return;
+  }
+
+  var definitions = getAccessPolicyFieldDefinitions();
+  for (var d = 0; d < definitions.length; d++) {
+    var field = definitions[d];
+    if (!existingFields[String(field.Name).toLowerCase()]) {
+      try {
+        field.DataExtension = { CustomerKey: policyKey };
+        var prox = new Script.Util.WSProxy();
+        prox.createItem("DataExtensionField", field);
+      } catch (fieldErr) {}
+    }
   }
 }
 
@@ -1295,7 +1355,7 @@ if (isApiRequest) {
       userDisplayName: authContext.userDisplayName || "",
       policyMatchCount: authPolicies ? authPolicies.length : 0,
       hasDisplayIdentity: !!(authContext.userDisplayName || authContext.userName || authContext.emailAddress),
-      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "User details missing") : "Not logged in - Limited Access"
+      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "User details missing") : "Not authorized - Limited Access"
     }));
   } else if (body.action === "debugLookupDe") {
     try {
@@ -3482,13 +3542,13 @@ async function loadAuthStatus() {
       ].filter(Boolean).join('\n');
       badge.classList.toggle('limited', !hasDisplayIdentity);
     } else {
-      badge.textContent = 'Not logged in - Limited Access';
-      badge.title = 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require login.';
+      badge.textContent = 'Not authorized - Limited Access';
+      badge.title = 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require an active access policy row.';
       badge.classList.add('limited');
     }
   } catch (err) {
-    badge.textContent = 'Not logged in - Limited Access';
-    badge.title = 'Could not verify login. Marketing Cloud Query Activities require login.';
+    badge.textContent = 'Not authorized - Limited Access';
+    badge.title = 'Could not verify access policy. Marketing Cloud Query Activities require an active access policy row.';
     badge.classList.add('limited');
   }
 }
