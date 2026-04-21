@@ -553,7 +553,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareQueryRun") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareLightQueryRun") return false;
   return true;
 }
 
@@ -1920,6 +1920,62 @@ if (isApiRequest) {
         message: String(debugPrepareErr)
       }));
     }
+  } else if (body.action === "prepareLightQueryRun") {
+    try {
+      var lightPrepareSql = ssjsTrim(String(body.sql || ""));
+      var lightReadOnly = lightPrepareSql ? validateReadOnlySql(lightPrepareSql) : { ok: false, message: "SQL text is required." };
+      if (!lightReadOnly.ok) {
+        Write(apiFail(lightReadOnly.message || "Only read-only SELECT queries are allowed.", {
+          step: "validate_sql"
+        }));
+      } else {
+        var lightDerived = deriveResultColumns(lightPrepareSql);
+        if (!lightDerived.ok) {
+          Write(apiFail(lightDerived.message, {
+            step: "derive_result_columns",
+            expression: lightDerived.expression || null
+          }));
+        } else {
+          var lightRunToken = String((new Date()).getTime()) + String(Math.floor(Math.random() * 1000000000));
+          var lightShortToken = lightRunToken.substring(0, 12);
+          Write(apiOk({
+            runToken: lightRunToken,
+            queryKey: "QP_QRY_" + lightShortToken,
+            queryName: "QP_QRY_" + lightShortToken,
+            queryObjectId: null,
+            resultKey: "QP_RES_" + lightShortToken,
+            resultName: "QP_RES_" + lightShortToken,
+            columns: lightDerived.columns,
+            resultDescription: "",
+            queryDescription: "",
+            auditMetadata: null,
+            retentionDeferred: true,
+            retentionDays: null,
+            retentionPolicy: "Not applied",
+            retentionRequestedDays: 21,
+            retentionRequestedPolicy: "All records and data extensions",
+            retentionFallbackUsed: true,
+            retentionErrorMessage: "Retention update deferred to a follow-up request to avoid CloudPage timeout.",
+            security: {
+              mode: "deferred",
+              context: null,
+              references: []
+            },
+            cleanupMetadata: {
+              folderName: "AcademyMCEPlayground",
+              resultPrefix: "QP_RES_",
+              queryPrefix: "QP_QRY_",
+              descriptionFields: ["CreatedUTC", "ExpiresUTC", "Source"]
+            }
+          }));
+        }
+      }
+    } catch (lightPrepareErr) {
+      Write(apiFail("prepareLightQueryRun failed.", {
+        step: "prepare_light_query_run",
+        message: String(lightPrepareErr)
+      }));
+    }
   } else if (body.action === "authStatus") {
     var authContext = getCurrentSecurityContext();
     var authPolicies = getMatchingSecurityPolicies(authContext);
@@ -2226,70 +2282,6 @@ if (isApiRequest) {
     }
   } else if (body._parseError) {
     Write(apiFail("Could not parse request JSON.", { parseError: body._parseError }));
-  } else if (body.action === "prepareQueryRun") {
-    try {
-      var prepareSqlText = ssjsTrim(String(body.sql || ""));
-      if (!prepareSqlText) {
-        Write(apiFail("SQL text is required.", { step: "validate_sql" }));
-      } else {
-        var prepareReadOnly = validateReadOnlySql(prepareSqlText);
-        if (!prepareReadOnly.ok) {
-          Write(apiFail(prepareReadOnly.message || "Only read-only SELECT queries are allowed.", {
-            step: "validate_sql"
-          }));
-        } else {
-          var prepareDerived = deriveResultColumns(prepareSqlText);
-          if (!prepareDerived.ok) {
-            Write(apiFail(prepareDerived.message, {
-              step: "derive_result_columns",
-              expression: prepareDerived.expression || null
-            }));
-          } else {
-            var prepareRunToken = String((new Date()).getTime()) + String(Math.floor(Math.random() * 1000000000));
-            var prepareShortToken = prepareRunToken.substring(0, 12);
-            var prepareResultKey = "QP_RES_" + prepareShortToken;
-            var prepareResultName = "QP_RES_" + prepareShortToken;
-            var prepareQueryKey = "QP_QRY_" + prepareShortToken;
-            var prepareQueryName = "QP_QRY_" + prepareShortToken;
-            Write(apiOk({
-              runToken: prepareRunToken,
-              queryKey: prepareQueryKey,
-              queryName: prepareQueryName,
-              queryObjectId: null,
-              resultKey: prepareResultKey,
-              resultName: prepareResultName,
-              columns: prepareDerived.columns,
-              resultDescription: "",
-              queryDescription: "",
-              auditMetadata: null,
-              retentionDeferred: true,
-              retentionDays: null,
-              retentionPolicy: "Not applied",
-              retentionRequestedDays: 21,
-              retentionRequestedPolicy: "All records and data extensions",
-              retentionFallbackUsed: true,
-              retentionErrorMessage: "Retention update deferred to a follow-up request to avoid CloudPage timeout.",
-              security: {
-                mode: "deferred",
-                context: null,
-                references: []
-              },
-              cleanupMetadata: {
-                folderName: "AcademyMCEPlayground",
-                resultPrefix: "QP_RES_",
-                queryPrefix: "QP_QRY_",
-                descriptionFields: ["CreatedUTC", "ExpiresUTC", "Source"]
-              }
-            }));
-          }
-        }
-      }
-    } catch (prepareErr) {
-      Write(apiFail("prepareQueryRun failed.", {
-        step: "prepare_query_run",
-        message: String(prepareErr)
-      }));
-    }
   } else if (body.action === "createPreparedResultDataExtension") {
     try {
       var preparedResultKey = ssjsTrim(String(body.resultKey || ""));
@@ -4403,26 +4395,13 @@ window.runRetentionDiagnostic = runRetentionDiagnostic;
 
 async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
-  const debugPayload = { action: 'prepareQueryRun', sql };
+  const debugPayload = { action: 'prepareLightQueryRun', sql };
   startRemoteRunUi('queued', 'Preparing query run…');
   logRemoteStep('query_definition:sql', sql);
   logRemoteStep('query_definition:start', {
     endpoint: window.location.pathname + '?api=1',
     payload: debugPayload
   });
-
-  const prepareDebug = await postApi({ action: 'debugPreparePipeline', sql });
-  logRemoteStep('query_definition:prepare_debug', {
-    status: prepareDebug.res.status,
-    ok: prepareDebug.res.ok,
-    body: prepareDebug.raw
-  });
-  if (!prepareDebug.json) {
-    throw new Error(`debugPreparePipeline returned HTTP ${prepareDebug.res.status} ${prepareDebug.res.statusText}. Response starts with: ${prepareDebug.raw.slice(0, 160)}`);
-  }
-  if (!prepareDebug.json.ok) {
-    throw new Error(prepareDebug.json.error?.message || 'debugPreparePipeline failed.');
-  }
 
   const prepare = await postApi(debugPayload);
   logRemoteStep('query_definition:prepare', {
@@ -4432,11 +4411,11 @@ async function runRemoteQueryDefinition(sql, options = {}) {
   });
 
   if (!prepare.json) {
-    throw new Error(`prepareQueryRun returned HTTP ${prepare.res.status} ${prepare.res.statusText}. Response starts with: ${prepare.raw.slice(0, 160)}`);
+    throw new Error(`prepareLightQueryRun returned HTTP ${prepare.res.status} ${prepare.res.statusText}. Response starts with: ${prepare.raw.slice(0, 160)}`);
   }
   if (!prepare.json.ok) {
     const details = prepare.json.error?.details || {};
-    const parts = [prepare.json.error?.message || 'prepareQueryRun failed.'];
+    const parts = [prepare.json.error?.message || 'prepareLightQueryRun failed.'];
     if (details.step) parts.push(`Step: ${details.step}`);
     if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
     if (details.retentionErrorMessage) parts.push(`Retention error: ${details.retentionErrorMessage}`);
