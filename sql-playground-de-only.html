@@ -553,7 +553,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "prepareQueryRun") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareQueryRun") return false;
   return true;
 }
 
@@ -1899,6 +1899,27 @@ if (isApiRequest) {
       apiMode: apiMode,
       body: body
     }));
+  } else if (body.action === "debugPreparePipeline") {
+    try {
+      var debugPrepareSql = ssjsTrim(String(body.sql || ""));
+      var debugReadOnly = debugPrepareSql ? validateReadOnlySql(debugPrepareSql) : { ok: false, message: "SQL text is required." };
+      var debugDerived = debugReadOnly.ok ? deriveResultColumns(debugPrepareSql) : { ok: false, message: "Skipped because read-only validation failed." };
+      Write(apiOk({
+        message: "debug prepare pipeline ok",
+        sqlLength: debugPrepareSql.length,
+        readOnly: debugReadOnly,
+        derived: debugDerived.ok ? {
+          ok: true,
+          columns: debugDerived.columns,
+          columnCount: debugDerived.columns.length
+        } : debugDerived
+      }));
+    } catch (debugPrepareErr) {
+      Write(apiFail("debugPreparePipeline failed.", {
+        step: "debug_prepare_pipeline",
+        message: String(debugPrepareErr)
+      }));
+    }
   } else if (body.action === "authStatus") {
     var authContext = getCurrentSecurityContext();
     var authPolicies = getMatchingSecurityPolicies(authContext);
@@ -4397,6 +4418,19 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     endpoint: window.location.pathname + '?api=1',
     payload: debugPayload
   });
+
+  const prepareDebug = await postApi({ action: 'debugPreparePipeline', sql });
+  logRemoteStep('query_definition:prepare_debug', {
+    status: prepareDebug.res.status,
+    ok: prepareDebug.res.ok,
+    body: prepareDebug.raw
+  });
+  if (!prepareDebug.json) {
+    throw new Error(`debugPreparePipeline returned HTTP ${prepareDebug.res.status} ${prepareDebug.res.statusText}. Response starts with: ${prepareDebug.raw.slice(0, 160)}`);
+  }
+  if (!prepareDebug.json.ok) {
+    throw new Error(prepareDebug.json.error?.message || 'debugPreparePipeline failed.');
+  }
 
   const prepare = await postApi(debugPayload);
   logRemoteStep('query_definition:prepare', {
