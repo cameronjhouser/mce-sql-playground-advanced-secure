@@ -478,9 +478,13 @@ function handleOAuthPageRequest() {
 function getCurrentSecurityContext() {
   var oauthSession = getOAuthSession();
   if (oauthSession) {
+    var sessionBuId = oauthSession.BusinessUnitID || "";
+    if (!sessionBuId || normalizeSecurityValue(sessionBuId) === "unknown") {
+      try { sessionBuId = Platform.Function.AccountID(); } catch (sessionBuErr) {}
+    }
     return {
       runnerId: oauthSession.UserKey || "OAuthAuthenticated",
-      businessUnitId: oauthSession.BusinessUnitID || "Unknown",
+      businessUnitId: sessionBuId || "Unknown",
       userName: oauthSession.UserName || "",
       emailAddress: oauthSession.EmailAddress || "",
       userDisplayName: oauthSession.UserDisplayName || ""
@@ -699,7 +703,13 @@ function ensureAccessPolicyDataExtensionFields(policyKey) {
 }
 
 function getMatchingSecurityPolicies(context) {
-  var cacheKey = normalizeSecurityValue((context && context.runnerId) || "") + "|" + normalizeSecurityValue((context && context.businessUnitId) || "");
+  var cacheKey = [
+    normalizeSecurityValue((context && context.runnerId) || ""),
+    normalizeSecurityValue((context && context.businessUnitId) || ""),
+    normalizeSecurityValue((context && context.userName) || ""),
+    normalizeSecurityValue((context && context.emailAddress) || ""),
+    normalizeSecurityValue((context && context.userDisplayName) || "")
+  ].join("|");
   if (!getMatchingSecurityPolicies._cache) getMatchingSecurityPolicies._cache = {};
   if (typeof getMatchingSecurityPolicies._cache[cacheKey] !== "undefined") return getMatchingSecurityPolicies._cache[cacheKey];
 
@@ -716,13 +726,24 @@ function getMatchingSecurityPolicies(context) {
   var matches = [];
   var runner = normalizeSecurityValue(context.runnerId);
   var bu = normalizeSecurityValue(context.businessUnitId);
+  var userName = normalizeSecurityValue(context.userName);
+  var emailAddress = normalizeSecurityValue(context.emailAddress);
+  var userDisplayName = normalizeSecurityValue(context.userDisplayName);
 
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     if (!isTruthySecurityValue(row.Active)) continue;
     var rowUser = normalizeSecurityValue(row.UserKey);
+    var rowUserName = normalizeSecurityValue(row.UserName);
+    var rowEmailAddress = normalizeSecurityValue(row.EmailAddress);
+    var rowUserDisplayName = normalizeSecurityValue(row.UserDisplayName);
     var rowMid = normalizeSecurityValue(row.AllowedMID);
-    var userMatches = !rowUser || rowUser === "*" || rowUser === runner;
+    var userMatches =
+      !rowUser || rowUser === "*" ||
+      (runner && rowUser === runner) ||
+      (userName && (rowUser === userName || rowUserName === userName)) ||
+      (emailAddress && (rowUser === emailAddress || rowEmailAddress === emailAddress)) ||
+      (userDisplayName && (rowUser === userDisplayName || rowUserDisplayName === userDisplayName));
     var midMatches = !rowMid || rowMid === "*" || rowMid === bu;
     if (userMatches && midMatches) matches.push(row);
   }
@@ -755,6 +776,27 @@ function getPolicyUserDetails(policies, context) {
     }
   }
   return {};
+}
+
+function getSecurityPolicySummary(context, policies) {
+  var rows = getSecurityPolicyRows();
+  return {
+    rowCount: rows ? rows.length : 0,
+    activeRowCount: (function () {
+      var count = 0;
+      if (!rows) return 0;
+      for (var i = 0; i < rows.length; i++) {
+        if (isTruthySecurityValue(rows[i].Active)) count++;
+      }
+      return count;
+    })(),
+    matchCount: policies ? policies.length : 0,
+    contextRunnerId: context ? context.runnerId || "" : "",
+    contextBusinessUnitId: context ? context.businessUnitId || "" : "",
+    contextUserName: context ? context.userName || "" : "",
+    contextEmailAddress: context ? context.emailAddress || "" : "",
+    contextUserDisplayName: context ? context.userDisplayName || "" : ""
+  };
 }
 
 function enrichSecurityContextWithPolicy(context) {
@@ -1819,6 +1861,7 @@ if (isApiRequest) {
       emailAddress: authContext.emailAddress || "",
       userDisplayName: authContext.userDisplayName || "",
       policyMatchCount: authPolicies ? authPolicies.length : 0,
+      policySummary: getSecurityPolicySummary(authContext, authPolicies),
       hasDisplayIdentity: !!(authContext.userDisplayName || authContext.userName || authContext.emailAddress),
       label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "Authenticated MC user") : (oauthSession ? "Logged in - Access policy required" : "Not authorized - Limited Access")
     }));
