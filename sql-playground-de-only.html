@@ -149,8 +149,7 @@ function getOAuthConfig() {
   };
 
   try {
-    var configKey = ensureOAuthConfigDataExtension();
-    var rows = Platform.Function.LookupRows(configKey, "ConfigKey", SECURITY_OAUTH_CONFIG_ROW_KEY) || [];
+    var rows = Platform.Function.LookupRows(SECURITY_OAUTH_CONFIG_DE_KEY, "ConfigKey", SECURITY_OAUTH_CONFIG_ROW_KEY) || [];
     if (rows.length) {
       var row = rows[0];
       config.exists = true;
@@ -616,25 +615,21 @@ function wildcardToRegExp(pattern) {
 
 function getSecurityPolicyRows() {
   if (typeof getSecurityPolicyRows._cache !== "undefined") return getSecurityPolicyRows._cache;
+  var policyColumns = [
+    "UserKey",
+    "UserName",
+    "EmailAddress",
+    "UserDisplayName",
+    "AllowedMID",
+    "AllowedFolderName",
+    "AllowedDEPattern",
+    "CanUseENT",
+    "CanUseDataViews",
+    "IsAdmin",
+    "Active"
+  ];
   try {
-    var policyKey = ensureAccessPolicyDataExtension();
-    if (!policyKey) {
-      getSecurityPolicyRows._cache = null;
-      return null;
-    }
-    getSecurityPolicyRows._cache = retrieveDeRowsViaWSProxy(policyKey, [
-      "UserKey",
-      "UserName",
-      "EmailAddress",
-      "UserDisplayName",
-      "AllowedMID",
-      "AllowedFolderName",
-      "AllowedDEPattern",
-      "CanUseENT",
-      "CanUseDataViews",
-      "IsAdmin",
-      "Active"
-    ]);
+    getSecurityPolicyRows._cache = retrieveDeRowsByName(SECURITY_POLICY_DE_KEY, policyColumns);
     return getSecurityPolicyRows._cache;
   } catch (e) {
     getSecurityPolicyRows._cache = null;
