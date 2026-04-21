@@ -42,6 +42,19 @@ var AUDIT_DE_KEY = "AcademyMCEPlayground_QueryAudit";
 var SECURITY_REQUIRE_ACCESS_POLICY = false;
 var SECURITY_TEMP_PREFIXES = ["QP_SRC_", "QP_RES_"];
 var SECURITY_DEFAULT_BLOCKED_FIELDS = ["password", "ssn", "socialsecurity", "token", "secret", "apikey", "api_key"];
+var SECURITY_OAUTH_SESSION_DE_KEY = "AcademyMCEPlayground_OAuthSessions";
+
+// Reliable Marketing Cloud user login.
+// Create an Installed Package > API Integration > Web App, then fill these in on the CloudPage copy.
+// Keep the client secret server-side only. Do not expose it in browser JavaScript.
+var SECURITY_OAUTH_ENABLED = false;
+var SECURITY_OAUTH_TENANT_SUBDOMAIN = ""; // Example: mcx3g7dtegr6hh7y5h7grhrgr97n
+var SECURITY_OAUTH_CLIENT_ID = "";
+var SECURITY_OAUTH_CLIENT_SECRET = "";
+var SECURITY_OAUTH_REDIRECT_URI = ""; // Full published CloudPage URL, without ?api=1
+var SECURITY_OAUTH_SESSION_MINUTES = 480;
+var SECURITY_OAUTH_COOKIE_NAME = "AcademyMCEPlaygroundSession";
+var SECURITY_OAUTH_STATE_COOKIE_NAME = "AcademyMCEPlaygroundState";
 
 function normalizeSecurityValue(value) {
   return ssjsTrim(String(value == null ? "" : value)).toLowerCase();
@@ -51,7 +64,253 @@ function isTruthySecurityValue(value) {
   return /^(true|yes|y|1)$/i.test(ssjsTrim(String(value == null ? "" : value)));
 }
 
+function isOAuthLoginEnabled() {
+  return !!(
+    SECURITY_OAUTH_ENABLED &&
+    ssjsTrim(SECURITY_OAUTH_TENANT_SUBDOMAIN) &&
+    ssjsTrim(SECURITY_OAUTH_CLIENT_ID) &&
+    ssjsTrim(SECURITY_OAUTH_CLIENT_SECRET) &&
+    ssjsTrim(SECURITY_OAUTH_REDIRECT_URI)
+  );
+}
+
+function addMinutesUtc(minutes) {
+  var d = new Date();
+  d.setTime(d.getTime() + (Number(minutes || 0) * 60 * 1000));
+  return d;
+}
+
+function formatDateObjectForSfmc(dateObj) {
+  function pad(n) { return n < 10 ? "0" + n : String(n); }
+  return dateObj.getFullYear() + "-" +
+    pad(dateObj.getMonth() + 1) + "-" +
+    pad(dateObj.getDate()) + "T" +
+    pad(dateObj.getHours()) + ":" +
+    pad(dateObj.getMinutes()) + ":" +
+    pad(dateObj.getSeconds());
+}
+
+function formatDateForCookie(dateObj) {
+  try { return dateObj.toUTCString(); } catch (e) { return ""; }
+}
+
+function getCookieValue(name) {
+  try {
+    var direct = Platform.Request.GetCookieValue(name);
+    if (direct) return direct;
+  } catch (e1) {}
+  try {
+    var raw = Platform.Request.GetRequestHeader("Cookie") || "";
+    var parts = raw.split(";");
+    for (var i = 0; i < parts.length; i++) {
+      var item = ssjsTrim(parts[i]);
+      if (item.indexOf(name + "=") === 0) {
+        return decodeURIComponent(item.substring(name.length + 1));
+      }
+    }
+  } catch (e2) {}
+  return "";
+}
+
+function setSessionCookie(name, value, expiresDate) {
+  var cookie = name + "=" + encodeURIComponent(value || "") + "; Path=/; SameSite=Lax; Secure";
+  if (expiresDate) cookie += "; Expires=" + formatDateForCookie(expiresDate);
+  Platform.Response.SetResponseHeader("Set-Cookie", cookie);
+}
+
+function expireSessionCookie(name) {
+  Platform.Response.SetResponseHeader("Set-Cookie", name + "=; Path=/; SameSite=Lax; Secure; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+}
+
+function buildOAuthAuthorizeUrl(state) {
+  var base = "https://" + ssjsTrim(SECURITY_OAUTH_TENANT_SUBDOMAIN) + ".auth.marketingcloudapis.com/v2/authorize";
+  return base +
+    "?response_type=code" +
+    "&client_id=" + encodeURIComponent(ssjsTrim(SECURITY_OAUTH_CLIENT_ID)) +
+    "&redirect_uri=" + encodeURIComponent(ssjsTrim(SECURITY_OAUTH_REDIRECT_URI)) +
+    "&state=" + encodeURIComponent(state);
+}
+
+function startOAuthLogin() {
+  var state = Platform.Function.GUID();
+  setSessionCookie(SECURITY_OAUTH_STATE_COOKIE_NAME, state, addMinutesUtc(15));
+  Platform.Response.Redirect(buildOAuthAuthorizeUrl(state));
+}
+
+function extractOAuthIdentity(tokenResponse) {
+  tokenResponse = tokenResponse || {};
+  var user = tokenResponse.user || tokenResponse.User || tokenResponse.member || tokenResponse.Member || {};
+  var userKey =
+    tokenResponse.user_id || tokenResponse.userId || tokenResponse.member_id || tokenResponse.memberId ||
+    tokenResponse.account_id || tokenResponse.accountId || user.id || user.ID || user.userId || user.UserID || "";
+  var userName =
+    tokenResponse.username || tokenResponse.user_name || tokenResponse.userName ||
+    user.username || user.userName || user.name || "";
+  var emailAddress =
+    tokenResponse.email || tokenResponse.emailAddress || tokenResponse.email_address ||
+    user.email || user.emailAddress || "";
+  var displayName =
+    tokenResponse.display_name || tokenResponse.displayName ||
+    user.displayName || user.display_name || user.fullName || user.name || "";
+  var safeTokenMetadata = {
+    scope: tokenResponse.scope || "",
+    expires_in: tokenResponse.expires_in || "",
+    rest_instance_url: tokenResponse.rest_instance_url || "",
+    soap_instance_url: tokenResponse.soap_instance_url || "",
+    user: user || {}
+  };
+
+  return {
+    userKey: ssjsTrim(userKey || "OAuthAuthenticated"),
+    userName: ssjsTrim(userName || ""),
+    emailAddress: ssjsTrim(emailAddress || ""),
+    userDisplayName: ssjsTrim(displayName || ""),
+    rawIdentity: truncateForDescription(Platform.Function.Stringify(safeTokenMetadata), 4000)
+  };
+}
+
+function ensureOAuthSessionDataExtension() {
+  var existing = getDeMetaByName(SECURITY_OAUTH_SESSION_DE_KEY);
+  if (existing && existing.CustomerKey) return existing.CustomerKey;
+
+  var prox = new Script.Util.WSProxy();
+  var folderId = ensurePlaygroundFolderId();
+  prox.createItem("DataExtension", {
+    CustomerKey: SECURITY_OAUTH_SESSION_DE_KEY,
+    Name: SECURITY_OAUTH_SESSION_DE_KEY,
+    Description: "Short-lived OAuth login sessions for Academy MCE SQL Playground.",
+    CategoryID: folderId,
+    IsSendable: false,
+    Fields: [
+      { Name: "SessionID", FieldType: "Text", MaxLength: 36, IsRequired: true, IsPrimaryKey: true },
+      { Name: "CreatedUTC", FieldType: "Date", IsRequired: false },
+      { Name: "ExpiresUTC", FieldType: "Date", IsRequired: false },
+      { Name: "UserKey", FieldType: "Text", MaxLength: 100, IsRequired: false },
+      { Name: "UserName", FieldType: "Text", MaxLength: 254, IsRequired: false },
+      { Name: "EmailAddress", FieldType: "EmailAddress", MaxLength: 254, IsRequired: false },
+      { Name: "UserDisplayName", FieldType: "Text", MaxLength: 254, IsRequired: false },
+      { Name: "BusinessUnitID", FieldType: "Text", MaxLength: 50, IsRequired: false },
+      { Name: "RestInstanceUrl", FieldType: "Text", MaxLength: 500, IsRequired: false },
+      { Name: "SoapInstanceUrl", FieldType: "Text", MaxLength: 500, IsRequired: false },
+      { Name: "RawIdentity", FieldType: "Text", MaxLength: 4000, IsRequired: false }
+    ]
+  });
+  return SECURITY_OAUTH_SESSION_DE_KEY;
+}
+
+function exchangeOAuthCode(code) {
+  var tokenUrl = "https://" + ssjsTrim(SECURITY_OAUTH_TENANT_SUBDOMAIN) + ".auth.marketingcloudapis.com/v2/token";
+  var payload = {
+    grant_type: "authorization_code",
+    code: code,
+    client_id: ssjsTrim(SECURITY_OAUTH_CLIENT_ID),
+    client_secret: ssjsTrim(SECURITY_OAUTH_CLIENT_SECRET),
+    redirect_uri: ssjsTrim(SECURITY_OAUTH_REDIRECT_URI)
+  };
+  var response = HTTP.Post(tokenUrl, "application/json", Platform.Function.Stringify(payload), [], []);
+  var body = response && response.Response ? String(response.Response[0] || "") : "";
+  if (!response || response.StatusCode < 200 || response.StatusCode >= 300) {
+    throw "OAuth token exchange failed: HTTP " + (response ? response.StatusCode : "Unknown") + " " + body;
+  }
+  return Platform.Function.ParseJSON(body);
+}
+
+function storeOAuthSession(tokenResponse) {
+  var identity = extractOAuthIdentity(tokenResponse);
+  var sessionId = Platform.Function.GUID();
+  var buId = null;
+  try { buId = Platform.Function.AccountID(); } catch (e1) {}
+  var sessionKey = ensureOAuthSessionDataExtension();
+  var sessionDe = DataExtension.Init(sessionKey);
+  var expiresDate = addMinutesUtc(SECURITY_OAUTH_SESSION_MINUTES);
+
+  sessionDe.Rows.Add({
+    SessionID: sessionId,
+    CreatedUTC: formatRetentionDate(0),
+    ExpiresUTC: formatDateObjectForSfmc(expiresDate),
+    UserKey: identity.userKey,
+    UserName: identity.userName,
+    EmailAddress: identity.emailAddress,
+    UserDisplayName: identity.userDisplayName,
+    BusinessUnitID: buId || "",
+    RestInstanceUrl: tokenResponse.rest_instance_url || "",
+    SoapInstanceUrl: tokenResponse.soap_instance_url || "",
+    RawIdentity: identity.rawIdentity
+  });
+
+  setSessionCookie(SECURITY_OAUTH_COOKIE_NAME, sessionId, expiresDate);
+  return sessionId;
+}
+
+function getOAuthSession() {
+  if (!isOAuthLoginEnabled()) return null;
+  var sessionId = getCookieValue(SECURITY_OAUTH_COOKIE_NAME);
+  if (!sessionId) return null;
+  try {
+    var rows = Platform.Function.LookupRows(SECURITY_OAUTH_SESSION_DE_KEY, "SessionID", sessionId) || [];
+    if (!rows.length) return null;
+    var row = rows[0];
+    var expiresText = String(row.ExpiresUTC || "");
+    if (expiresText) {
+      var expires = new Date(expiresText);
+      if (!isNaN(expires.getTime()) && expires.getTime() < (new Date()).getTime()) return null;
+    }
+    return row;
+  } catch (e) {
+    return null;
+  }
+}
+
+function handleOAuthPageRequest() {
+  if (!isOAuthLoginEnabled() || isApiRequest) return;
+  var logout = Platform.Request.GetQueryStringParameter("logout");
+  if (logout == "1") {
+    expireSessionCookie(SECURITY_OAUTH_COOKIE_NAME);
+    Platform.Response.Redirect(ssjsTrim(SECURITY_OAUTH_REDIRECT_URI));
+  }
+
+  var code = Platform.Request.GetQueryStringParameter("code");
+  var state = Platform.Request.GetQueryStringParameter("state");
+  var login = Platform.Request.GetQueryStringParameter("login");
+  if (code) {
+    var expectedState = getCookieValue(SECURITY_OAUTH_STATE_COOKIE_NAME);
+    if (!expectedState || expectedState !== state) {
+      Variable.SetValue("@oauthError", "OAuth state validation failed. Please try logging in again.");
+      return;
+    }
+    try {
+      storeOAuthSession(exchangeOAuthCode(code));
+      Platform.Response.Redirect(ssjsTrim(SECURITY_OAUTH_REDIRECT_URI));
+    } catch (oauthErr) {
+      Variable.SetValue("@oauthError", "OAuth token exchange failed. Check the Installed Package client ID, client secret, tenant subdomain, and redirect URI.");
+    }
+  } else if (login == "1") {
+    startOAuthLogin();
+  }
+}
+
 function getCurrentSecurityContext() {
+  var oauthSession = getOAuthSession();
+  if (oauthSession) {
+    return {
+      runnerId: oauthSession.UserKey || "OAuthAuthenticated",
+      businessUnitId: oauthSession.BusinessUnitID || "Unknown",
+      userName: oauthSession.UserName || "",
+      emailAddress: oauthSession.EmailAddress || "",
+      userDisplayName: oauthSession.UserDisplayName || ""
+    };
+  }
+  if (isOAuthLoginEnabled()) {
+    var oauthBuId = null;
+    try { oauthBuId = Platform.Function.AccountID(); } catch (oauthBuErr) {}
+    return {
+      runnerId: "Unknown",
+      businessUnitId: oauthBuId || "Unknown",
+      userName: "",
+      emailAddress: "",
+      userDisplayName: ""
+    };
+  }
   var runnerId = null;
   var buId = null;
   try { runnerId = Platform.Function.AuthenticatedMemberID(); } catch (e1) {}
@@ -252,6 +511,7 @@ function ensureAccessPolicyDataExtensionFields(policyKey) {
 }
 
 function getMatchingSecurityPolicies(context) {
+  if (isOAuthLoginEnabled() && !getOAuthSession()) return null;
   var rows = getSecurityPolicyRows();
   if (!rows || !rows.length) return null;
 
@@ -1340,14 +1600,19 @@ if (isApiRequest) {
     var authContext = getCurrentSecurityContext();
     var authPolicies = getMatchingSecurityPolicies(authContext);
     var isLoggedIn = !!(authPolicies && authPolicies.length);
+    var oauthSession = getOAuthSession();
     if (isLoggedIn) {
       var authDetails = getPolicyUserDetails(authPolicies, authContext);
-      authContext.userName = authDetails.userName || "";
-      authContext.emailAddress = authDetails.emailAddress || "";
-      authContext.userDisplayName = authDetails.userDisplayName || "";
+      authContext.userName = authContext.userName || authDetails.userName || "";
+      authContext.emailAddress = authContext.emailAddress || authDetails.emailAddress || "";
+      authContext.userDisplayName = authContext.userDisplayName || authDetails.userDisplayName || "";
     }
     Write(apiOk({
       authenticated: isLoggedIn,
+      oauthEnabled: isOAuthLoginEnabled(),
+      oauthAuthenticated: !!oauthSession,
+      loginUrl: isOAuthLoginEnabled() ? "?login=1" : "",
+      logoutUrl: isOAuthLoginEnabled() && oauthSession ? "?logout=1" : "",
       runnerId: authContext.runnerId,
       businessUnitId: authContext.businessUnitId,
       userName: authContext.userName || "",
@@ -1355,7 +1620,7 @@ if (isApiRequest) {
       userDisplayName: authContext.userDisplayName || "",
       policyMatchCount: authPolicies ? authPolicies.length : 0,
       hasDisplayIdentity: !!(authContext.userDisplayName || authContext.userName || authContext.emailAddress),
-      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "User details missing") : "Not authorized - Limited Access"
+      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "Authenticated MC user") : (oauthSession ? "Logged in - Access policy required" : "Not authorized - Limited Access")
     }));
   } else if (body.action === "debugLookupDe") {
     try {
@@ -1940,6 +2205,7 @@ if (isApiRequest) {
     Write(apiOk({ message: "API online" }));
   }
 }
+handleOAuthPageRequest();
 </script>
 %%[ IF @isApiRequest != "true" THEN ]%%
 <!DOCTYPE html>
@@ -1986,6 +2252,12 @@ if (isApiRequest) {
   .user-status-badge.limited {
     color: #FF0000; border-color: #7b1010; background: #2a0d0d;
   }
+  .auth-link {
+    display: none; color: #9cc7f5; border: 1px solid #1e3a5f; background: #07101c;
+    border-radius: 4px; padding: 3px 8px; font-size: 11px; font-weight: 700;
+    text-decoration: none; white-space: nowrap;
+  }
+  .auth-link:hover { color: #fff; border-color: #0070d2; background: #0d1b2a; }
 
   /* Sample queries dropdown */
   .sample-wrap { position: relative; }
@@ -2316,8 +2588,13 @@ if (isApiRequest) {
   <span class="warning-banner">⚠ For learning purposes only — Do not use client data</span>
   <div class="header-right">
     <span class="user-status-badge limited" id="userStatusBadge">Checking login...</span>
+    <a class="auth-link" id="loginLink" href="?login=1">Log in</a>
+    <a class="auth-link" id="logoutLink" href="?logout=1">Log out</a>
   </div>
 </div>
+%%[ IF NOT EMPTY(@oauthError) THEN ]%%
+<div class="warning-banner" style="display:block; border-radius:0; padding:6px 14px;">OAuth login error: %%=v(@oauthError)=%%</div>
+%%[ ENDIF ]%%
 
 <!-- ── ACTION BAR: run/clear + samples ── -->
 <div class="action-bar">
@@ -3516,10 +3793,20 @@ async function postApi(payload) {
 
 async function loadAuthStatus() {
   const badge = document.getElementById('userStatusBadge');
+  const loginLink = document.getElementById('loginLink');
+  const logoutLink = document.getElementById('logoutLink');
   if (!badge) return;
   try {
     const response = await postApi({ action: 'authStatus' });
     const data = response.json && response.json.ok ? response.json.data : null;
+    if (loginLink) {
+      loginLink.style.display = data && data.oauthEnabled && !data.oauthAuthenticated ? 'inline-block' : 'none';
+      loginLink.href = (data && data.loginUrl) || '?login=1';
+    }
+    if (logoutLink) {
+      logoutLink.style.display = data && data.oauthEnabled && data.oauthAuthenticated ? 'inline-block' : 'none';
+      logoutLink.href = (data && data.logoutUrl) || '?logout=1';
+    }
     if (data && data.authenticated) {
       const cleanIdentity = value => {
         const text = String(value || '').trim();
@@ -3541,12 +3828,20 @@ async function loadAuthStatus() {
         data.businessUnitId ? `BU: ${data.businessUnitId}` : ''
       ].filter(Boolean).join('\n');
       badge.classList.toggle('limited', !hasDisplayIdentity);
+    } else if (data && data.oauthAuthenticated) {
+      badge.textContent = 'Logged in - Access policy required';
+      badge.title = 'Marketing Cloud login is valid, but no active access policy row matched this user/BU.';
+      badge.classList.add('limited');
     } else {
       badge.textContent = 'Not authorized - Limited Access';
-      badge.title = 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require an active access policy row.';
+      badge.title = data && data.oauthEnabled
+        ? 'Use Log in to authenticate with Marketing Cloud. CSV upload and local SQLite queries are available without login.'
+        : 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require an active access policy row.';
       badge.classList.add('limited');
     }
   } catch (err) {
+    if (loginLink) loginLink.style.display = 'none';
+    if (logoutLink) logoutLink.style.display = 'none';
     badge.textContent = 'Not authorized - Limited Access';
     badge.title = 'Could not verify access policy. Marketing Cloud Query Activities require an active access policy row.';
     badge.classList.add('limited');
