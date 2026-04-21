@@ -620,21 +620,28 @@ function wildcardToRegExp(pattern) {
 
 function getSecurityPolicyRows() {
   if (typeof getSecurityPolicyRows._cache !== "undefined") return getSecurityPolicyRows._cache;
-  var policyColumns = [
-    "UserKey",
-    "UserName",
-    "EmailAddress",
-    "UserDisplayName",
-    "AllowedMID",
-    "AllowedFolderName",
-    "AllowedDEPattern",
-    "CanUseENT",
-    "CanUseDataViews",
-    "IsAdmin",
-    "Active"
-  ];
   try {
-    getSecurityPolicyRows._cache = retrieveDeRowsByName(SECURITY_POLICY_DE_KEY, policyColumns);
+    var rows = [];
+    var seen = {};
+    var activeValues = ["true", "True", "TRUE", "1"];
+    for (var a = 0; a < activeValues.length; a++) {
+      var matched = Platform.Function.LookupRows(SECURITY_POLICY_DE_KEY, "Active", activeValues[a]) || [];
+      for (var i = 0; i < matched.length; i++) {
+        var key = [
+          matched[i].UserKey || "",
+          matched[i].UserName || "",
+          matched[i].EmailAddress || "",
+          matched[i].AllowedMID || "",
+          matched[i].AllowedFolderName || "",
+          matched[i].AllowedDEPattern || ""
+        ].join("|");
+        if (!seen[key]) {
+          seen[key] = true;
+          rows.push(matched[i]);
+        }
+      }
+    }
+    getSecurityPolicyRows._cache = rows;
     return getSecurityPolicyRows._cache;
   } catch (e) {
     getSecurityPolicyRows._cache = null;
