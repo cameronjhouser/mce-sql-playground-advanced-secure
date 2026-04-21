@@ -1254,6 +1254,14 @@ if (isApiRequest) {
         var sourceCreate = createTempSourceDataExtension(sourceKey, sourceName, columns, fieldSettings);
 
         if (sourceCreate && sourceCreate.Status && String(sourceCreate.Status).toLowerCase() === "error") {
+          safeWriteQueryAuditEvent({
+            runId: stageToken,
+            status: "TempSourceDECreateFailed",
+            resultKey: sourceKey,
+            errorMessage: extractCreateErrorMessage(sourceCreate),
+            context: getCurrentSecurityContext(),
+            securityMode: "temp_de"
+          });
           Write(apiFail("Temporary source Data Extension creation failed.", {
             step: "create_temp_source_de",
             localName: localName,
@@ -1268,6 +1276,16 @@ if (isApiRequest) {
           var sourceRetentionUpdate = updateDataExtensionRetention(sourceKey, 21);
           var sourceRetentionApplied = isWsProxyOk(sourceRetentionUpdate);
           var sourceRetentionError = sourceRetentionApplied ? null : extractCreateErrorMessage(sourceRetentionUpdate);
+          var sourceAuditResult = safeWriteQueryAuditEvent({
+            runId: stageToken,
+            status: "TempSourceDECreated",
+            resultKey: sourceKey,
+            rowCount: 0,
+            errorMessage: sourceRetentionError || "",
+            context: getCurrentSecurityContext(),
+            references: [{ raw: localName, name: localName, type: "CSV_UPLOAD" }],
+            securityMode: "temp_de"
+          });
 
           Write(apiOk({
             localName: localName,
@@ -1284,6 +1302,7 @@ if (isApiRequest) {
             retentionFallbackUsed: !sourceRetentionApplied,
             retentionErrorMessage: sourceRetentionError,
             retentionUpdateResult: sourceRetentionUpdate,
+            auditLogResult: sourceAuditResult,
             sourceDescription: buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "source DE"),
             cleanupMetadata: {
               folderName: folderInfoStage ? folderInfoStage.Name : "AcademyMCEPlayground",
@@ -1360,6 +1379,31 @@ if (isApiRequest) {
         step: "debug_temp_source_rows",
         sourceKey: body.sourceKey || "",
         message: String(debugSourceErr)
+      }));
+    }
+  } else if (body.action === "auditClientEvent") {
+    try {
+      var auditStatus = ssjsTrim(String(body.status || "ClientEvent"));
+      var auditResult = safeWriteQueryAuditEvent({
+        runId: body.runId || Platform.Function.GUID(),
+        status: auditStatus,
+        sqlText: body.queryText || "",
+        resultKey: body.resultKey || "",
+        queryKey: body.queryKey || "",
+        taskId: body.taskId || "",
+        rowCount: body.rowCount || 0,
+        errorMessage: body.errorMessage || "",
+        references: body.references || [],
+        securityMode: body.securityMode || "client_event"
+      });
+      Write(apiOk({
+        status: auditStatus,
+        auditLogResult: auditResult
+      }));
+    } catch (auditClientErr) {
+      Write(apiFail("auditClientEvent failed.", {
+        step: "audit_client_event",
+        message: String(auditClientErr)
       }));
     }
   } else if (body._parseError) {
@@ -1483,6 +1527,19 @@ if (isApiRequest) {
           } else {
             var performResult = performQueryDefinition(qd.ObjectID);
             var taskId = extractTaskId(performResult);
+            safeWriteQueryAuditEvent({
+              runId: runToken,
+              status: "TempResultDECreated",
+              sqlText: sqlText,
+              resultKey: resultKey,
+              queryKey: queryKey,
+              taskId: taskId,
+              rowCount: 0,
+              errorMessage: retentionErrorMessage || "",
+              context: securityCheck.context,
+              references: securityCheck.references,
+              securityMode: securityCheck.policyMode
+            });
             var auditSubmitResult = safeWriteQueryAuditEvent({
               runId: runToken,
               status: "Submitted",
@@ -2505,10 +2562,47 @@ function getRetentionFallbackWarning(remote) {
   return buildRetentionWarningText(remote);
 }
 
+function auditDownloadEvent(format, csvData) {
+  try {
+    const cur = tabs.find(t => t.id === activeTabId);
+    const columns = (csvData && csvData.columns) || [];
+    const values = (csvData && csvData.values) || [];
+    postApi({
+      action: 'auditClientEvent',
+      status: format === 'json' ? 'DownloadJSON' : 'DownloadCSV',
+      runId: (csvData && csvData.runToken) || '',
+      resultKey: (csvData && (csvData.resultKey || csvData.dataExtension)) || '',
+      queryKey: (csvData && csvData.queryKey) || '',
+      taskId: (csvData && csvData.taskId) || '',
+      queryText: editor ? editor.getValue() : '',
+      rowCount: values.length,
+      references: [{
+        raw: cur ? cur.label : 'active query',
+        name: cur ? cur.label : 'active query',
+        type: 'RESULT_DOWNLOAD',
+        format: format,
+        columnCount: columns.length
+      }],
+      securityMode: 'download'
+    }).then(resp => {
+      logRemoteStep('audit:download', {
+        format,
+        status: resp.res.status,
+        ok: resp.res.ok
+      });
+    }).catch(err => {
+      logRemoteStep('audit:download_error', String(err));
+    });
+  } catch (err) {
+    logRemoteStep('audit:download_error', String(err));
+  }
+}
+
 function downloadCSV() {
   const cur = tabs.find(t => t.id === activeTabId);
   const csvData = cur && cur.results && cur.results.csvData;
   if (!csvData) return;
+  auditDownloadEvent('csv', csvData);
   const { columns, values } = csvData;
   const escape = v => {
     if (v === null || v === undefined) return '';
@@ -2529,6 +2623,7 @@ function downloadJSON() {
   const cur = tabs.find(t => t.id === activeTabId);
   const csvData = cur && cur.results && cur.results.csvData;
   if (!csvData) return;
+  auditDownloadEvent('json', csvData);
   const columns = csvData.columns || [];
   const values = csvData.values || [];
   const rows = values.map(row => {
@@ -3320,7 +3415,13 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     }
   }
 
-  return results.json.data;
+  const resultData = results.json.data || {};
+  resultData.runToken = submitted.runToken;
+  resultData.queryKey = submitted.queryKey;
+  resultData.taskId = submitted.taskId;
+  resultData.securityMode = submitted.security?.mode || '';
+  resultData.resultKey = resultData.resultKey || submitted.resultKey;
+  return resultData;
 }
 
 window.runRemoteQueryDefinitionAsJson = async function(sql) {
