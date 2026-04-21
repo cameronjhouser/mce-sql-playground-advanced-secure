@@ -553,7 +553,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "prepareQueryRun") return false;
   return true;
 }
 
@@ -2211,12 +2211,10 @@ if (isApiRequest) {
       if (!prepareSqlText) {
         Write(apiFail("SQL text is required.", { step: "validate_sql" }));
       } else {
-        var prepareSecurityCheck = enforceQuerySecurity(prepareSqlText, apiAuthGate);
-        if (!prepareSecurityCheck.ok) {
-          Write(apiFail(prepareSecurityCheck.message || "Query blocked by playground security policy.", {
-            step: "security_policy",
-            context: prepareSecurityCheck.context || null,
-            object: prepareSecurityCheck.object || null
+        var prepareReadOnly = validateReadOnlySql(prepareSqlText);
+        if (!prepareReadOnly.ok) {
+          Write(apiFail(prepareReadOnly.message || "Only read-only SELECT queries are allowed.", {
+            step: "validate_sql"
           }));
         } else {
           var prepareDerived = deriveResultColumns(prepareSqlText);
@@ -2232,7 +2230,14 @@ if (isApiRequest) {
             var prepareResultName = "QP_RES_" + prepareShortToken;
             var prepareQueryKey = "QP_QRY_" + prepareShortToken;
             var prepareQueryName = "QP_QRY_" + prepareShortToken;
-            var prepareAuditMeta = getExecutionAuditMetadata(prepareSqlText, prepareResultKey);
+            var prepareAuditMeta = {
+              RunUTC: formatRetentionDate(0),
+              RunnerID: "PendingAuth",
+              BusinessUnitID: "PendingAuth",
+              ResultDE: prepareResultKey,
+              QueryText: truncateForDescription(prepareSqlText || "", 700),
+              RowCount: "Pending"
+            };
             Write(apiOk({
               runToken: prepareRunToken,
               queryKey: prepareQueryKey,
@@ -2252,9 +2257,9 @@ if (isApiRequest) {
               retentionFallbackUsed: true,
               retentionErrorMessage: "Retention update deferred to a follow-up request to avoid CloudPage timeout.",
               security: {
-                mode: prepareSecurityCheck.policyMode,
-                context: prepareSecurityCheck.context,
-                references: prepareSecurityCheck.references
+                mode: "deferred",
+                context: null,
+                references: extractSqlObjectReferences(prepareSqlText)
               },
               cleanupMetadata: {
                 folderName: "AcademyMCEPlayground",
@@ -2322,6 +2327,25 @@ if (isApiRequest) {
           resultKey: preparedQdResultKey
         }));
       } else {
+        var preparedQdSecurityCheck = enforceQuerySecurity(preparedQdSql, apiAuthGate);
+        if (!preparedQdSecurityCheck.ok) {
+          safeWriteQueryAuditEvent({
+            runId: Platform.Function.GUID(),
+            status: "Blocked",
+            sqlText: preparedQdSql,
+            resultKey: preparedQdResultKey,
+            queryKey: preparedQdKey,
+            errorMessage: preparedQdSecurityCheck.message || "Query blocked by playground security policy.",
+            context: preparedQdSecurityCheck.context || getCurrentSecurityContext(),
+            references: preparedQdSecurityCheck.object ? [preparedQdSecurityCheck.object] : [],
+            securityMode: "blocked"
+          });
+          Write(apiFail(preparedQdSecurityCheck.message || "Query blocked by playground security policy.", {
+            step: "security_policy",
+            context: preparedQdSecurityCheck.context || null,
+            object: preparedQdSecurityCheck.object || null
+          }));
+        } else {
         var preparedQdCreate = createTempQueryDefinition(preparedQdKey, preparedQdName, preparedQdSql, preparedQdResultKey, preparedQdResultName);
         if (preparedQdCreate && preparedQdCreate.Status && String(preparedQdCreate.Status).toLowerCase() === "error") {
           Write(apiFail("Temporary QueryDefinition creation failed.", {
@@ -2336,6 +2360,7 @@ if (isApiRequest) {
             resultKey: preparedQdResultKey,
             qdCreate: preparedQdCreate
           }));
+        }
         }
       }
     } catch (preparedQdErr) {
