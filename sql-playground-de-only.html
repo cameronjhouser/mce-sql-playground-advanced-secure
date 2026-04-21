@@ -879,6 +879,17 @@ function policyAllowsObject(policies, ref, deMeta) {
   return false;
 }
 
+function policiesRequireFolderMetadata(policies) {
+  if (!policies || !policies.length) return false;
+  for (var i = 0; i < policies.length; i++) {
+    var policy = policies[i];
+    if (isTruthySecurityValue(policy.IsAdmin)) continue;
+    var allowedFolder = ssjsTrim(String(policy.AllowedFolderName || ""));
+    if (allowedFolder && allowedFolder !== "*") return true;
+  }
+  return false;
+}
+
 function getDataFolderById(folderId) {
   try {
     var prox = new Script.Util.WSProxy();
@@ -925,8 +936,11 @@ function enforceQuerySecurity(sqlText, authGate) {
     if (ref.isTemp) continue;
 
     if (policies && policies.length) {
-      var deMeta = ref.isDataView ? null : getDeMetaByName(ref.name);
-      if (!policyAllowsObject(policies, ref, deMeta)) {
+      var isAllowed = policyAllowsObject(policies, ref, null);
+      if (!isAllowed && !ref.isDataView && policiesRequireFolderMetadata(policies)) {
+        isAllowed = policyAllowsObject(policies, ref, getDeMetaByName(ref.name));
+      }
+      if (!isAllowed) {
         return {
           ok: false,
           message: "Access blocked by playground policy for object: " + ref.raw,
