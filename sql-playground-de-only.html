@@ -2158,7 +2158,7 @@ if (isApiRequest) {
           var folderInfo = null;
           var retentionUpdate = null;
           var usedRetention = false;
-          var retentionErrorMessage = null;
+          var retentionErrorMessage = "Retention update deferred to a follow-up request to avoid CloudPage timeout.";
 
           if (deCreate && deCreate.Status && String(deCreate.Status).toLowerCase() === "error") {
             safeWriteQueryAuditEvent({
@@ -2185,13 +2185,6 @@ if (isApiRequest) {
               deCreate: deCreate
             }));
           } else {
-          updateDataExtensionDescription(resultKey, resultDescription);
-          retentionUpdate = updateDataExtensionRetention(resultKey, 21);
-          if (isWsProxyOk(retentionUpdate)) {
-            usedRetention = true;
-          } else {
-            retentionErrorMessage = extractCreateErrorMessage(retentionUpdate);
-          }
           var qdCreate = createTempQueryDefinition(queryKey, queryName, sqlText, resultKey, resultName);
 
           if (qdCreate && qdCreate.Status && String(qdCreate.Status).toLowerCase() === "error") {
@@ -2238,6 +2231,7 @@ if (isApiRequest) {
               retentionFallbackUsed: !usedRetention,
               retentionErrorMessage: retentionErrorMessage,
               retentionUpdateResult: retentionUpdate,
+              retentionDeferred: true,
               resultDescription: resultDescription,
               queryDescription: queryDescription,
               auditMetadata: auditMeta,
@@ -2297,6 +2291,51 @@ if (isApiRequest) {
         step: "start_prepared_query_definition",
         queryKey: body.queryKey || "",
         message: String(startPreparedErr)
+      }));
+    }
+  } else if (body.action === "finalizePreparedQueryMetadata") {
+    try {
+      var finalizeResultKey = ssjsTrim(String(body.resultKey || ""));
+      var finalizeQueryKey = ssjsTrim(String(body.queryKey || ""));
+      var finalizeResultDescription = String(body.resultDescription || "");
+      var finalizeQueryDescription = String(body.queryDescription || "");
+      var finalizeRetentionUpdate = null;
+      var finalizeRetentionApplied = false;
+      var finalizeRetentionError = "";
+
+      if (finalizeResultKey && finalizeResultDescription) {
+        try { updateDataExtensionDescription(finalizeResultKey, finalizeResultDescription); } catch (finalizeDescErr) {}
+      }
+      if (finalizeQueryKey && finalizeQueryDescription) {
+        try {
+          var finalizeQdProxy = new Script.Util.WSProxy();
+          finalizeQdProxy.updateItem("QueryDefinition", {
+            CustomerKey: finalizeQueryKey,
+            Description: finalizeQueryDescription
+          });
+        } catch (finalizeQdDescErr) {}
+      }
+      if (finalizeResultKey) {
+        finalizeRetentionUpdate = updateDataExtensionRetention(finalizeResultKey, 21);
+        finalizeRetentionApplied = isWsProxyOk(finalizeRetentionUpdate);
+        finalizeRetentionError = finalizeRetentionApplied ? "" : extractCreateErrorMessage(finalizeRetentionUpdate);
+      }
+
+      Write(apiOk({
+        resultKey: finalizeResultKey,
+        queryKey: finalizeQueryKey,
+        retentionDays: finalizeRetentionApplied ? 21 : null,
+        retentionPolicy: finalizeRetentionApplied ? "All records and data extensions" : "Not applied",
+        retentionFallbackUsed: !finalizeRetentionApplied,
+        retentionErrorMessage: finalizeRetentionError,
+        retentionUpdateResult: finalizeRetentionUpdate
+      }));
+    } catch (finalizeErr) {
+      Write(apiFail("finalizePreparedQueryMetadata failed.", {
+        step: "finalize_prepared_query_metadata",
+        resultKey: body.resultKey || "",
+        queryKey: body.queryKey || "",
+        message: String(finalizeErr)
       }));
     }
   } else if (body.action === "getQueryDefinitionStatus") {
@@ -4120,6 +4159,29 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     taskId = startResp.json.data.taskId;
     submitted.taskId = taskId;
     submitted.performResult = startResp.json.data.performResult;
+  }
+  if (submitted.retentionDeferred) {
+    postApi({
+      action: 'finalizePreparedQueryMetadata',
+      resultKey: submitted.resultKey,
+      queryKey: submitted.queryKey,
+      resultDescription: submitted.resultDescription || '',
+      queryDescription: submitted.queryDescription || ''
+    }).then(finalizeResp => {
+      logRemoteStep('query_definition:finalize_metadata', {
+        status: finalizeResp.res.status,
+        ok: finalizeResp.res.ok,
+        bodyPreview: finalizeResp.raw.slice(0, 220)
+      });
+      if (finalizeResp.json && finalizeResp.json.ok) {
+        submitted.retentionDays = finalizeResp.json.data.retentionDays;
+        submitted.retentionPolicy = finalizeResp.json.data.retentionPolicy;
+        submitted.retentionFallbackUsed = finalizeResp.json.data.retentionFallbackUsed;
+        submitted.retentionErrorMessage = finalizeResp.json.data.retentionErrorMessage;
+      }
+    }).catch(finalizeErr => {
+      logRemoteStep('query_definition:finalize_metadata_error', String(finalizeErr));
+    });
   }
   if (!taskId) {
     throw new Error('QueryDefinition was submitted but no TaskID was returned.');
