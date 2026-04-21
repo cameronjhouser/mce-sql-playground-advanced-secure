@@ -414,20 +414,35 @@ function storeOAuthSession(tokenResponse) {
 }
 
 function getOAuthSession() {
-  if (!isOAuthLoginEnabled()) return null;
+  if (typeof getOAuthSession._cache !== "undefined") return getOAuthSession._cache;
+  if (!isOAuthLoginEnabled()) {
+    getOAuthSession._cache = null;
+    return null;
+  }
   var sessionId = getCookieValue(SECURITY_OAUTH_COOKIE_NAME);
-  if (!sessionId) return null;
+  if (!sessionId) {
+    getOAuthSession._cache = null;
+    return null;
+  }
   try {
     var rows = Platform.Function.LookupRows(SECURITY_OAUTH_SESSION_DE_KEY, "SessionID", sessionId) || [];
-    if (!rows.length) return null;
+    if (!rows.length) {
+      getOAuthSession._cache = null;
+      return null;
+    }
     var row = rows[0];
     var expiresText = String(row.ExpiresUTC || "");
     if (expiresText) {
       var expires = new Date(expiresText);
-      if (!isNaN(expires.getTime()) && expires.getTime() < (new Date()).getTime()) return null;
+      if (!isNaN(expires.getTime()) && expires.getTime() < (new Date()).getTime()) {
+        getOAuthSession._cache = null;
+        return null;
+      }
     }
-    return row;
+    getOAuthSession._cache = row;
+    return getOAuthSession._cache;
   } catch (e) {
+    getOAuthSession._cache = null;
     return null;
   }
 }
@@ -600,10 +615,14 @@ function wildcardToRegExp(pattern) {
 }
 
 function getSecurityPolicyRows() {
+  if (typeof getSecurityPolicyRows._cache !== "undefined") return getSecurityPolicyRows._cache;
   try {
     var policyKey = ensureAccessPolicyDataExtension();
-    if (!policyKey) return null;
-    return retrieveDeRowsViaWSProxy(policyKey, [
+    if (!policyKey) {
+      getSecurityPolicyRows._cache = null;
+      return null;
+    }
+    getSecurityPolicyRows._cache = retrieveDeRowsViaWSProxy(policyKey, [
       "UserKey",
       "UserName",
       "EmailAddress",
@@ -616,7 +635,9 @@ function getSecurityPolicyRows() {
       "IsAdmin",
       "Active"
     ]);
+    return getSecurityPolicyRows._cache;
   } catch (e) {
+    getSecurityPolicyRows._cache = null;
     return null;
   }
 }
@@ -682,9 +703,19 @@ function ensureAccessPolicyDataExtensionFields(policyKey) {
 }
 
 function getMatchingSecurityPolicies(context) {
-  if (isOAuthLoginEnabled() && !getOAuthSession()) return null;
+  var cacheKey = normalizeSecurityValue((context && context.runnerId) || "") + "|" + normalizeSecurityValue((context && context.businessUnitId) || "");
+  if (!getMatchingSecurityPolicies._cache) getMatchingSecurityPolicies._cache = {};
+  if (typeof getMatchingSecurityPolicies._cache[cacheKey] !== "undefined") return getMatchingSecurityPolicies._cache[cacheKey];
+
+  if (isOAuthLoginEnabled() && !getOAuthSession()) {
+    getMatchingSecurityPolicies._cache[cacheKey] = null;
+    return null;
+  }
   var rows = getSecurityPolicyRows();
-  if (!rows || !rows.length) return null;
+  if (!rows || !rows.length) {
+    getMatchingSecurityPolicies._cache[cacheKey] = null;
+    return null;
+  }
 
   var matches = [];
   var runner = normalizeSecurityValue(context.runnerId);
@@ -699,6 +730,7 @@ function getMatchingSecurityPolicies(context) {
     var midMatches = !rowMid || rowMid === "*" || rowMid === bu;
     if (userMatches && midMatches) matches.push(row);
   }
+  getMatchingSecurityPolicies._cache[cacheKey] = matches;
   return matches;
 }
 
@@ -774,13 +806,13 @@ function getDataFolderById(folderId) {
   return null;
 }
 
-function enforceQuerySecurity(sqlText) {
+function enforceQuerySecurity(sqlText, authGate) {
   var readOnly = validateReadOnlySql(sqlText);
   if (!readOnly.ok) return readOnly;
 
-  var context = getCurrentSecurityContext();
+  var context = authGate && authGate.context ? authGate.context : getCurrentSecurityContext();
   var refs = extractSqlObjectReferences(sqlText);
-  var policies = getMatchingSecurityPolicies(context);
+  var policies = authGate && authGate.policies ? authGate.policies : getMatchingSecurityPolicies(context);
   if (!policies || !policies.length) {
     return {
       ok: false,
@@ -2078,7 +2110,7 @@ if (isApiRequest) {
       if (!sqlText) {
         Write(apiFail("SQL text is required.", { step: "validate_sql" }));
       } else {
-        var securityCheck = enforceQuerySecurity(sqlText);
+        var securityCheck = enforceQuerySecurity(sqlText, apiAuthGate);
         if (!securityCheck.ok) {
           safeWriteQueryAuditEvent({
             runId: Platform.Function.GUID(),
