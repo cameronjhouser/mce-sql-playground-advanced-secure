@@ -91,7 +91,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "auditClientEvent") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent") return false;
   return true;
 }
 
@@ -1254,6 +1254,18 @@ if (isApiRequest) {
       apiMode: apiMode,
       body: body
     }));
+  } else if (body.action === "authStatus") {
+    var authContext = enrichSecurityContextWithPolicy(getCurrentSecurityContext());
+    var isLoggedIn = isAuthenticatedSecurityContext(authContext);
+    Write(apiOk({
+      authenticated: isLoggedIn,
+      runnerId: authContext.runnerId,
+      businessUnitId: authContext.businessUnitId,
+      userName: authContext.userName || "",
+      emailAddress: authContext.emailAddress || "",
+      userDisplayName: authContext.userDisplayName || "",
+      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || authContext.runnerId) : "Not logged in - Limited Access"
+    }));
   } else if (body.action === "debugLookupDe") {
     try {
       var debugDe = getDeMetaByName(body.name || "");
@@ -1875,6 +1887,14 @@ if (isApiRequest) {
     white-space: nowrap; letter-spacing: .2px;
   }
   .header-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .user-status-badge {
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 4px;
+    border: 1px solid #1e3a5f; color: #9cc7f5; background: #07101c;
+    white-space: nowrap; letter-spacing: .2px;
+  }
+  .user-status-badge.limited {
+    color: #FF0000; border-color: #7b1010; background: #2a0d0d;
+  }
 
   /* Sample queries dropdown */
   .sample-wrap { position: relative; }
@@ -2203,7 +2223,9 @@ if (isApiRequest) {
   <span class="app-title">MCE SQL Playground Advanced</span>
   <span class="badge">SQL</span>
   <span class="warning-banner">⚠ For learning purposes only — Do not use client data</span>
-  <div class="header-right"></div>
+  <div class="header-right">
+    <span class="user-status-badge limited" id="userStatusBadge">Checking login...</span>
+  </div>
 </div>
 
 <!-- ── ACTION BAR: run/clear + samples ── -->
@@ -3401,6 +3423,34 @@ async function postApi(payload) {
   return { res, raw, json };
 }
 
+async function loadAuthStatus() {
+  const badge = document.getElementById('userStatusBadge');
+  if (!badge) return;
+  try {
+    const response = await postApi({ action: 'authStatus' });
+    const data = response.json && response.json.ok ? response.json.data : null;
+    if (data && data.authenticated) {
+      badge.textContent = `Logged in: ${data.label}`;
+      badge.title = [
+        data.userDisplayName ? `Display name: ${data.userDisplayName}` : '',
+        data.userName ? `Username: ${data.userName}` : '',
+        data.emailAddress ? `Email: ${data.emailAddress}` : '',
+        data.runnerId ? `Member ID: ${data.runnerId}` : '',
+        data.businessUnitId ? `BU: ${data.businessUnitId}` : ''
+      ].filter(Boolean).join('\n');
+      badge.classList.remove('limited');
+    } else {
+      badge.textContent = 'Not logged in - Limited Access';
+      badge.title = 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require login.';
+      badge.classList.add('limited');
+    }
+  } catch (err) {
+    badge.textContent = 'Not logged in - Limited Access';
+    badge.title = 'Could not verify login. Marketing Cloud Query Activities require login.';
+    badge.classList.add('limited');
+  }
+}
+
 async function runRetentionDiagnostic(customerKey) {
   const payload = { action: 'debugRetentionUpdate', customerKey };
   logRemoteStep('retention_diagnostic:start', {
@@ -3799,6 +3849,7 @@ document.addEventListener('click', closeSamples);
 renderTabs();
 buildFnPanel();
 buildSamplesDropdown();
+loadAuthStatus();
 initDB().catch(console.error);
 </script>
 </body>
