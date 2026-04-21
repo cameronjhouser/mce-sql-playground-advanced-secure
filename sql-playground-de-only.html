@@ -620,6 +620,19 @@ function wildcardToRegExp(pattern) {
 
 function getSecurityPolicyRows() {
   if (typeof getSecurityPolicyRows._cache !== "undefined") return getSecurityPolicyRows._cache;
+  var policyColumns = [
+    "UserKey",
+    "UserName",
+    "EmailAddress",
+    "UserDisplayName",
+    "AllowedMID",
+    "AllowedFolderName",
+    "AllowedDEPattern",
+    "CanUseENT",
+    "CanUseDataViews",
+    "IsAdmin",
+    "Active"
+  ];
   try {
     var rows = [];
     var seen = {};
@@ -639,6 +652,12 @@ function getSecurityPolicyRows() {
           seen[key] = true;
           rows.push(matched[i]);
         }
+      }
+    }
+    if (!rows.length) {
+      var fallbackRows = retrieveDeRowsViaWSProxy(SECURITY_POLICY_DE_KEY, policyColumns);
+      for (var f = 0; f < fallbackRows.length; f++) {
+        if (isTruthySecurityValue(fallbackRows[f].Active)) rows.push(fallbackRows[f]);
       }
     }
     getSecurityPolicyRows._cache = rows;
