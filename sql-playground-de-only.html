@@ -4077,6 +4077,11 @@ async function loadAuthStatus() {
   try {
     const response = await postApi({ action: 'authStatus' });
     const data = response.json && response.json.ok ? response.json.data : null;
+    logRemoteStep('auth_status', data || {
+      status: response.res.status,
+      ok: response.res.ok,
+      bodyPreview: response.raw.slice(0, 220)
+    });
     if (loginLink) {
       loginLink.style.display = data && data.oauthEnabled && !data.oauthAuthenticated ? 'inline-block' : 'none';
       loginLink.href = (data && data.loginUrl) || '?login=1';
@@ -4108,7 +4113,18 @@ async function loadAuthStatus() {
       badge.classList.toggle('limited', !hasDisplayIdentity);
     } else if (data && data.oauthAuthenticated) {
       badge.textContent = 'Logged in - Access policy required';
-      badge.title = 'Marketing Cloud login is valid, but no active access policy row matched this user/BU.';
+      const summary = data.policySummary || {};
+      badge.title = [
+        'Marketing Cloud login is valid, but no active access policy row matched this user/BU.',
+        `Policy rows: ${summary.rowCount ?? 'unknown'}`,
+        `Active policy rows: ${summary.activeRowCount ?? 'unknown'}`,
+        `Matched policy rows: ${summary.matchCount ?? 0}`,
+        summary.contextRunnerId ? `UserKey compared: ${summary.contextRunnerId}` : '',
+        summary.contextUserName ? `UserName compared: ${summary.contextUserName}` : '',
+        summary.contextEmailAddress ? `Email compared: ${summary.contextEmailAddress}` : '',
+        summary.contextUserDisplayName ? `Display name compared: ${summary.contextUserDisplayName}` : '',
+        summary.contextBusinessUnitId ? `BU compared: ${summary.contextBusinessUnitId}` : ''
+      ].filter(Boolean).join('\n');
       badge.classList.add('limited');
     } else {
       badge.textContent = 'Not authorized - Limited Access';
