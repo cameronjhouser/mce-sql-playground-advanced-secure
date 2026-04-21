@@ -84,6 +84,15 @@ function normalizeOAuthTenantSubdomain(value) {
   return ssjsTrim(text);
 }
 
+function getOAuthResponseValue(source, names) {
+  source = source || {};
+  for (var i = 0; i < names.length; i++) {
+    var value = source[names[i]];
+    if (value !== null && value !== undefined && String(value) !== "") return value;
+  }
+  return "";
+}
+
 function getOAuthConfigProblem() {
   var config = getOAuthConfig();
   if (!config.exists) return "OAuth config row missing. Add ConfigKey=DEFAULT to " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
@@ -227,26 +236,58 @@ function startOAuthLogin() {
   Platform.Response.Redirect(buildOAuthAuthorizeUrl(state));
 }
 
-function extractOAuthIdentity(tokenResponse) {
+function getOAuthUserInfo(tokenResponse) {
+  if (!tokenResponse || !tokenResponse.access_token) return {};
+  try {
+    var config = getOAuthConfig();
+    var url = "https://" + ssjsTrim(config.tenantSubdomain) + ".auth.marketingcloudapis.com/v2/userinfo";
+    var response = HTTP.Get(url, ["Authorization"], ["Bearer " + tokenResponse.access_token]);
+    var body = "";
+    if (response && response.Content) body = String(response.Content || "");
+    if (!body && response && response.Response && response.Response.length) body = String(response.Response[0] || "");
+    if (response && response.StatusCode >= 200 && response.StatusCode < 300 && body) {
+      return Platform.Function.ParseJSON(body);
+    }
+  } catch (e) {}
+  return {};
+}
+
+function extractOAuthIdentity(tokenResponse, userInfo) {
   tokenResponse = tokenResponse || {};
+  userInfo = userInfo || {};
   var user = tokenResponse.user || tokenResponse.User || tokenResponse.member || tokenResponse.Member || {};
+  var infoUser = userInfo.user || userInfo.User || userInfo.member || userInfo.Member || {};
   var userKey =
-    tokenResponse.user_id || tokenResponse.userId || tokenResponse.member_id || tokenResponse.memberId ||
-    tokenResponse.account_id || tokenResponse.accountId || user.id || user.ID || user.userId || user.UserID || "";
+    getOAuthResponseValue(userInfo, ["user_id", "userId", "member_id", "memberId", "sub", "id", "ID"]) ||
+    getOAuthResponseValue(infoUser, ["id", "ID", "userId", "UserID", "member_id", "memberId"]) ||
+    getOAuthResponseValue(tokenResponse, ["user_id", "userId", "member_id", "memberId", "sub"]) ||
+    getOAuthResponseValue(user, ["id", "ID", "userId", "UserID", "member_id", "memberId"]) ||
+    "";
   var userName =
-    tokenResponse.username || tokenResponse.user_name || tokenResponse.userName ||
-    user.username || user.userName || user.name || "";
+    getOAuthResponseValue(userInfo, ["username", "user_name", "userName", "preferred_username", "name"]) ||
+    getOAuthResponseValue(infoUser, ["username", "userName", "name"]) ||
+    getOAuthResponseValue(tokenResponse, ["username", "user_name", "userName"]) ||
+    getOAuthResponseValue(user, ["username", "userName", "name"]) ||
+    "";
   var emailAddress =
-    tokenResponse.email || tokenResponse.emailAddress || tokenResponse.email_address ||
-    user.email || user.emailAddress || "";
+    getOAuthResponseValue(userInfo, ["email", "emailAddress", "email_address"]) ||
+    getOAuthResponseValue(infoUser, ["email", "emailAddress", "email_address"]) ||
+    getOAuthResponseValue(tokenResponse, ["email", "emailAddress", "email_address"]) ||
+    getOAuthResponseValue(user, ["email", "emailAddress", "email_address"]) ||
+    "";
   var displayName =
-    tokenResponse.display_name || tokenResponse.displayName ||
-    user.displayName || user.display_name || user.fullName || user.name || "";
+    getOAuthResponseValue(userInfo, ["display_name", "displayName", "fullName", "name"]) ||
+    getOAuthResponseValue(infoUser, ["displayName", "display_name", "fullName", "name"]) ||
+    getOAuthResponseValue(tokenResponse, ["display_name", "displayName"]) ||
+    getOAuthResponseValue(user, ["displayName", "display_name", "fullName", "name"]) ||
+    "";
   var safeTokenMetadata = {
     scope: tokenResponse.scope || "",
     expires_in: tokenResponse.expires_in || "",
+    account_id: tokenResponse.account_id || tokenResponse.accountId || "",
     rest_instance_url: tokenResponse.rest_instance_url || "",
     soap_instance_url: tokenResponse.soap_instance_url || "",
+    userInfo: userInfo || {},
     user: user || {}
   };
 
@@ -261,7 +302,10 @@ function extractOAuthIdentity(tokenResponse) {
 
 function ensureOAuthSessionDataExtension() {
   var existing = getDeMetaByName(SECURITY_OAUTH_SESSION_DE_KEY);
-  if (existing && existing.CustomerKey) return existing.CustomerKey;
+  if (existing && existing.CustomerKey) {
+    ensureOAuthSessionDataExtensionFields(existing.CustomerKey);
+    return existing.CustomerKey;
+  }
 
   var prox = new Script.Util.WSProxy();
   var folderId = ensurePlaygroundFolderId();
@@ -288,6 +332,40 @@ function ensureOAuthSessionDataExtension() {
   return SECURITY_OAUTH_SESSION_DE_KEY;
 }
 
+function ensureOAuthSessionDataExtensionFields(sessionKey) {
+  var existingFields = {};
+  try {
+    var fields = getDeFieldNames(sessionKey);
+    for (var i = 0; i < fields.length; i++) {
+      existingFields[String(fields[i]).toLowerCase()] = true;
+    }
+  } catch (e) {
+    return;
+  }
+
+  var definitions = [
+    { Name: "UserKey", FieldType: "Text", MaxLength: 100, IsRequired: false },
+    { Name: "UserName", FieldType: "Text", MaxLength: 254, IsRequired: false },
+    { Name: "EmailAddress", FieldType: "EmailAddress", MaxLength: 254, IsRequired: false },
+    { Name: "UserDisplayName", FieldType: "Text", MaxLength: 254, IsRequired: false },
+    { Name: "BusinessUnitID", FieldType: "Text", MaxLength: 50, IsRequired: false },
+    { Name: "RestInstanceUrl", FieldType: "Text", MaxLength: 500, IsRequired: false },
+    { Name: "SoapInstanceUrl", FieldType: "Text", MaxLength: 500, IsRequired: false },
+    { Name: "RawIdentity", FieldType: "Text", MaxLength: 4000, IsRequired: false }
+  ];
+
+  for (var d = 0; d < definitions.length; d++) {
+    var field = definitions[d];
+    if (!existingFields[String(field.Name).toLowerCase()]) {
+      try {
+        field.DataExtension = { CustomerKey: sessionKey };
+        var prox = new Script.Util.WSProxy();
+        prox.createItem("DataExtensionField", field);
+      } catch (fieldErr) {}
+    }
+  }
+}
+
 function exchangeOAuthCode(code) {
   var config = getOAuthConfig();
   var tokenUrl = "https://" + ssjsTrim(config.tenantSubdomain) + ".auth.marketingcloudapis.com/v2/token";
@@ -307,10 +385,12 @@ function exchangeOAuthCode(code) {
 }
 
 function storeOAuthSession(tokenResponse) {
-  var identity = extractOAuthIdentity(tokenResponse);
+  var userInfo = getOAuthUserInfo(tokenResponse);
+  var identity = extractOAuthIdentity(tokenResponse, userInfo);
   var sessionId = Platform.Function.GUID();
   var buId = null;
   try { buId = Platform.Function.AccountID(); } catch (e1) {}
+  buId = buId || tokenResponse.account_id || tokenResponse.accountId || getOAuthResponseValue(userInfo, ["account_id", "accountId", "member_id", "memberId"]) || "";
   var sessionKey = ensureOAuthSessionDataExtension();
   var sessionDe = DataExtension.Init(sessionKey);
   var expiresDate = addMinutesUtc(getOAuthConfig().sessionMinutes);
