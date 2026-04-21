@@ -2245,20 +2245,12 @@ if (isApiRequest) {
               expression: prepareDerived.expression || null
             }));
           } else {
-            var prepareRunToken = Platform.Function.GUID();
-            var prepareShortToken = String(prepareRunToken).replace(/-/g, "").substring(0, 12);
+            var prepareRunToken = String((new Date()).getTime()) + String(Math.floor(Math.random() * 1000000000));
+            var prepareShortToken = prepareRunToken.substring(0, 12);
             var prepareResultKey = "QP_RES_" + prepareShortToken;
             var prepareResultName = "QP_RES_" + prepareShortToken;
             var prepareQueryKey = "QP_QRY_" + prepareShortToken;
             var prepareQueryName = "QP_QRY_" + prepareShortToken;
-            var prepareAuditMeta = {
-              RunUTC: formatRetentionDate(0),
-              RunnerID: "PendingAuth",
-              BusinessUnitID: "PendingAuth",
-              ResultDE: prepareResultKey,
-              QueryText: truncateForDescription(prepareSqlText || "", 700),
-              RowCount: "Pending"
-            };
             Write(apiOk({
               runToken: prepareRunToken,
               queryKey: prepareQueryKey,
@@ -2267,9 +2259,9 @@ if (isApiRequest) {
               resultKey: prepareResultKey,
               resultName: prepareResultName,
               columns: prepareDerived.columns,
-              resultDescription: buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "result DE", prepareAuditMeta),
-              queryDescription: buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "query definition", prepareAuditMeta),
-              auditMetadata: prepareAuditMeta,
+              resultDescription: "",
+              queryDescription: "",
+              auditMetadata: null,
               retentionDeferred: true,
               retentionDays: null,
               retentionPolicy: "Not applied",
@@ -2280,7 +2272,7 @@ if (isApiRequest) {
               security: {
                 mode: "deferred",
                 context: null,
-                references: extractSqlObjectReferences(prepareSqlText)
+                references: []
               },
               cleanupMetadata: {
                 folderName: "AcademyMCEPlayground",
