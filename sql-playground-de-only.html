@@ -70,22 +70,32 @@ function isAuthenticatedSecurityContext(context) {
   return !!(runner && runner !== "unknown" && runner !== "0" && runner !== "null" && runner !== "undefined");
 }
 
+function isAuthorizedSecurityContext(context) {
+  var policies = getMatchingSecurityPolicies(context || getCurrentSecurityContext());
+  return !!(policies && policies.length);
+}
+
 function requireAuthenticatedServerAccess(actionName) {
   var context = getCurrentSecurityContext();
-  if (isAuthenticatedSecurityContext(context)) {
-    return { ok: true, context: context };
+  var policies = getMatchingSecurityPolicies(context);
+  if (policies && policies.length) {
+    var details = getPolicyUserDetails(policies);
+    context.userName = details.userName || "";
+    context.emailAddress = details.emailAddress || "";
+    context.userDisplayName = details.userDisplayName || "";
+    return { ok: true, context: context, policies: policies };
   }
   safeWriteQueryAuditEvent({
     runId: Platform.Function.GUID(),
     status: "AnonymousBlocked",
-    errorMessage: "Anonymous users cannot access server-side playground action: " + actionName,
+    errorMessage: "Unauthorized or anonymous users cannot access server-side playground action: " + actionName,
     context: context,
     securityMode: "anonymous_blocked"
   });
   return {
     ok: false,
     context: context,
-    message: "You must be logged in to use server-side Marketing Cloud query features. Anonymous users can upload CSV files and run local SQLite queries only."
+    message: "You must be logged in and authorized in the playground access policy to use server-side Marketing Cloud query features. Anonymous users can upload CSV files and run local SQLite queries only."
   };
 }
 
@@ -266,16 +276,16 @@ function enforceQuerySecurity(sqlText) {
   if (!readOnly.ok) return readOnly;
 
   var context = getCurrentSecurityContext();
-  if (!isAuthenticatedSecurityContext(context)) {
+  var refs = extractSqlObjectReferences(sqlText);
+  var policies = getMatchingSecurityPolicies(context);
+  if (!policies || !policies.length) {
     return {
       ok: false,
-      message: "You must be logged in to run Marketing Cloud Query Activities. Anonymous users can upload CSV files and run local SQLite queries only.",
+      message: "You must be logged in and authorized in the playground access policy to run Marketing Cloud Query Activities. Anonymous users can upload CSV files and run local SQLite queries only.",
       context: context,
       policyMode: "anonymous_blocked"
     };
   }
-  var refs = extractSqlObjectReferences(sqlText);
-  var policies = getMatchingSecurityPolicies(context);
   var userDetails = getPolicyUserDetails(policies);
   context.userName = userDetails.userName || "";
   context.emailAddress = userDetails.emailAddress || "";
@@ -1255,8 +1265,15 @@ if (isApiRequest) {
       body: body
     }));
   } else if (body.action === "authStatus") {
-    var authContext = enrichSecurityContextWithPolicy(getCurrentSecurityContext());
-    var isLoggedIn = isAuthenticatedSecurityContext(authContext);
+    var authContext = getCurrentSecurityContext();
+    var authPolicies = getMatchingSecurityPolicies(authContext);
+    var isLoggedIn = !!(authPolicies && authPolicies.length);
+    if (isLoggedIn) {
+      var authDetails = getPolicyUserDetails(authPolicies);
+      authContext.userName = authDetails.userName || "";
+      authContext.emailAddress = authDetails.emailAddress || "";
+      authContext.userDisplayName = authDetails.userDisplayName || "";
+    }
     Write(apiOk({
       authenticated: isLoggedIn,
       runnerId: authContext.runnerId,
@@ -1264,6 +1281,7 @@ if (isApiRequest) {
       userName: authContext.userName || "",
       emailAddress: authContext.emailAddress || "",
       userDisplayName: authContext.userDisplayName || "",
+      policyMatchCount: authPolicies ? authPolicies.length : 0,
       label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || authContext.runnerId) : "Not logged in - Limited Access"
     }));
   } else if (body.action === "debugLookupDe") {
@@ -3430,7 +3448,8 @@ async function loadAuthStatus() {
     const response = await postApi({ action: 'authStatus' });
     const data = response.json && response.json.ok ? response.json.data : null;
     if (data && data.authenticated) {
-      badge.textContent = `Logged in: ${data.label}`;
+      const displayLabel = data.userDisplayName || data.userName || data.emailAddress || 'Authorized user';
+      badge.textContent = `Logged in: ${displayLabel}`;
       badge.title = [
         data.userDisplayName ? `Display name: ${data.userDisplayName}` : '',
         data.userName ? `Username: ${data.userName}` : '',
