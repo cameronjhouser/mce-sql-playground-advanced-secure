@@ -1610,6 +1610,22 @@ function createTempQueryDefinition(queryKey, queryName, sql, resultKey, resultNa
   });
 }
 
+function createFastTempQueryDefinition(queryKey, queryName, sql, resultKey, resultName) {
+  return createQueryDefinition({
+    CustomerKey: queryKey,
+    Name: queryName,
+    Description: "",
+    CategoryID: 0,
+    QueryText: sql,
+    TargetType: "DE",
+    TargetUpdateType: "Overwrite",
+    DataExtensionTarget: {
+      CustomerKey: resultKey,
+      Name: resultName
+    }
+  });
+}
+
 // NOTE:
 // Generic QueryDefinition retriever.
 // Defaults to the core fields used by this app, but can accept a custom field list.
@@ -2351,7 +2367,7 @@ if (isApiRequest) {
             object: preparedQdSecurityCheck.object || null
           }));
         } else {
-        var preparedQdCreate = createTempQueryDefinition(preparedQdKey, preparedQdName, preparedQdSql, preparedQdResultKey, preparedQdResultName);
+        var preparedQdCreate = createFastTempQueryDefinition(preparedQdKey, preparedQdName, preparedQdSql, preparedQdResultKey, preparedQdResultName);
         if (preparedQdCreate && preparedQdCreate.Status && String(preparedQdCreate.Status).toLowerCase() === "error") {
           Write(apiFail("Temporary QueryDefinition creation failed.", {
             step: "create_prepared_query_definition",
