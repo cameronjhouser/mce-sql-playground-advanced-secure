@@ -64,11 +64,30 @@ function isOAuthLoginEnabled() {
   var config = getOAuthConfig();
   return !!(
     config.enabled &&
+    isValidOAuthTenantSubdomain(config.tenantSubdomain) &&
     ssjsTrim(config.tenantSubdomain) &&
     ssjsTrim(config.clientId) &&
     ssjsTrim(config.clientSecret) &&
     ssjsTrim(config.redirectUri)
   );
+}
+
+function isValidOAuthTenantSubdomain(value) {
+  var text = ssjsTrim(value || "");
+  return !!(text && !/^\d+$/.test(text) && /^[a-z0-9-]+$/i.test(text) && text.indexOf(".") < 0);
+}
+
+function getOAuthConfigProblem() {
+  var config = getOAuthConfig();
+  if (!config.exists) return "OAuth config row missing. Add ConfigKey=DEFAULT to " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
+  if (!config.enabled) return "";
+  if (!isValidOAuthTenantSubdomain(config.tenantSubdomain)) {
+    return "TenantSubdomain is invalid. Use the Installed Package tenant subdomain from the REST Base URI, not the MID. Example: mcx3g7dtegr6hh7y5h7grhrgr97n.";
+  }
+  if (!ssjsTrim(config.clientId)) return "ClientID is missing in " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
+  if (!ssjsTrim(config.clientSecret)) return "ClientSecret is missing in " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
+  if (!ssjsTrim(config.redirectUri)) return "RedirectURI is missing in " + SECURITY_OAUTH_CONFIG_DE_KEY + ".";
+  return "";
 }
 
 function getOAuthConfigFieldDefinitions() {
@@ -191,6 +210,11 @@ function buildOAuthAuthorizeUrl(state) {
 }
 
 function startOAuthLogin() {
+  var problem = getOAuthConfigProblem();
+  if (problem) {
+    Variable.SetValue("@oauthError", problem);
+    return;
+  }
   var state = Platform.Function.GUID();
   setSessionCookie(SECURITY_OAUTH_STATE_COOKIE_NAME, state, addMinutesUtc(15));
   Platform.Response.Redirect(buildOAuthAuthorizeUrl(state));
@@ -1670,6 +1694,7 @@ if (isApiRequest) {
     Write(apiOk({
       authenticated: isLoggedIn,
       oauthEnabled: isOAuthLoginEnabled(),
+      oauthConfigProblem: getOAuthConfigProblem(),
       oauthAuthenticated: !!oauthSession,
       loginUrl: isOAuthLoginEnabled() ? "?login=1" : "",
       logoutUrl: isOAuthLoginEnabled() && oauthSession ? "?logout=1" : "",
@@ -3894,7 +3919,9 @@ async function loadAuthStatus() {
       badge.classList.add('limited');
     } else {
       badge.textContent = 'Not authorized - Limited Access';
-      badge.title = data && data.oauthEnabled
+      badge.title = data && data.oauthConfigProblem
+        ? data.oauthConfigProblem
+        : data && data.oauthEnabled
         ? 'Use Log in to authenticate with Marketing Cloud. CSV upload and local SQLite queries are available without login.'
         : 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require an active access policy row.';
       badge.classList.add('limited');
