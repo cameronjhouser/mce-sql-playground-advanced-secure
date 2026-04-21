@@ -526,6 +526,9 @@ function isAuthorizedSecurityContext(context) {
 
 function requireAuthenticatedServerAccess(actionName) {
   var context = getCurrentSecurityContext();
+  if (actionName !== "authStatus" && isOAuthLoginEnabled() && getOAuthSession()) {
+    return { ok: true, context: context, policies: null, sessionOnly: true };
+  }
   var policies = getMatchingSecurityPolicies(context);
   if (policies && policies.length) {
     var details = getPolicyUserDetails(policies, context);
@@ -636,21 +639,40 @@ function getSecurityPolicyRows() {
   try {
     var rows = [];
     var seen = {};
-    var activeValues = ["true", "True", "TRUE", "1"];
-    for (var a = 0; a < activeValues.length; a++) {
-      var matched = Platform.Function.LookupRows(SECURITY_POLICY_DE_KEY, "Active", activeValues[a]) || [];
-      for (var i = 0; i < matched.length; i++) {
-        var key = [
-          matched[i].UserKey || "",
-          matched[i].UserName || "",
-          matched[i].EmailAddress || "",
-          matched[i].AllowedMID || "",
-          matched[i].AllowedFolderName || "",
-          matched[i].AllowedDEPattern || ""
+    var wildcardRows = Platform.Function.LookupRows(SECURITY_POLICY_DE_KEY, "UserKey", "*") || [];
+    for (var w = 0; w < wildcardRows.length; w++) {
+      if (isTruthySecurityValue(wildcardRows[w].Active)) {
+        var wildcardKey = [
+          wildcardRows[w].UserKey || "",
+          wildcardRows[w].UserName || "",
+          wildcardRows[w].EmailAddress || "",
+          wildcardRows[w].AllowedMID || "",
+          wildcardRows[w].AllowedFolderName || "",
+          wildcardRows[w].AllowedDEPattern || ""
         ].join("|");
-        if (!seen[key]) {
-          seen[key] = true;
-          rows.push(matched[i]);
+        if (!seen[wildcardKey]) {
+          seen[wildcardKey] = true;
+          rows.push(wildcardRows[w]);
+        }
+      }
+    }
+    var activeValues = ["true", "True", "TRUE", "1"];
+    if (!rows.length) {
+      for (var a = 0; a < activeValues.length; a++) {
+        var matched = Platform.Function.LookupRows(SECURITY_POLICY_DE_KEY, "Active", activeValues[a]) || [];
+        for (var i = 0; i < matched.length; i++) {
+          var key = [
+            matched[i].UserKey || "",
+            matched[i].UserName || "",
+            matched[i].EmailAddress || "",
+            matched[i].AllowedMID || "",
+            matched[i].AllowedFolderName || "",
+            matched[i].AllowedDEPattern || ""
+          ].join("|");
+          if (!seen[key]) {
+            seen[key] = true;
+            rows.push(matched[i]);
+          }
         }
       }
     }
