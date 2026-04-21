@@ -2149,13 +2149,13 @@ if (isApiRequest) {
           var resultName = "QP_RES_" + shortToken;
           var queryKey = "QP_QRY_" + shortToken;
           var queryName = "QP_QRY_" + shortToken;
-          var queryFolderInfo = getPlaygroundQueryFolder();
+          var queryFolderInfo = null;
 
           var auditMeta = getExecutionAuditMetadata(sqlText, resultKey);
           var resultDescription = buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "result DE", auditMeta);
           var queryDescription = buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "query definition", auditMeta);
           var deCreate = createTempResultDataExtension(resultKey, resultName, derived.columns);
-          var folderInfo = getPlaygroundFolder();
+          var folderInfo = null;
           var retentionUpdate = null;
           var usedRetention = false;
           var retentionErrorMessage = null;
@@ -2193,16 +2193,8 @@ if (isApiRequest) {
             retentionErrorMessage = extractCreateErrorMessage(retentionUpdate);
           }
           var qdCreate = createTempQueryDefinition(queryKey, queryName, sqlText, resultKey, resultName);
-          try {
-            var proxQdDesc = new Script.Util.WSProxy();
-            proxQdDesc.updateItem("QueryDefinition", {
-              CustomerKey: queryKey,
-              Description: queryDescription
-            });
-          } catch (descErr) {}
-          var qd = getQueryDefinitionByKey(queryKey);
 
-          if (!qd || !qd.ObjectID) {
+          if (qdCreate && qdCreate.Status && String(qdCreate.Status).toLowerCase() === "error") {
             safeWriteQueryAuditEvent({
               runId: runToken,
               status: "Failed",
@@ -2214,50 +2206,30 @@ if (isApiRequest) {
               references: securityCheck.references,
               securityMode: securityCheck.policyMode
             });
-            Write(apiFail("QueryDefinition was created but could not be retrieved for execution.", {
-              step: "retrieve_query_definition",
+            Write(apiFail("Temporary QueryDefinition creation failed.", {
+              step: "create_query_definition",
               queryKey: queryKey,
               deCreate: deCreate,
               qdCreate: qdCreate
             }));
           } else {
-            var performResult = performQueryDefinition(qd.ObjectID);
-            var taskId = extractTaskId(performResult);
-            safeWriteQueryAuditEvent({
-              runId: runToken,
-              status: "TempResultDECreated",
-              sqlText: sqlText,
-              resultKey: resultKey,
-              queryKey: queryKey,
-              taskId: taskId,
-              rowCount: 0,
-              errorMessage: retentionErrorMessage || "",
-              context: securityCheck.context,
-              references: securityCheck.references,
-              securityMode: securityCheck.policyMode
-            });
-            var auditSubmitResult = safeWriteQueryAuditEvent({
-              runId: runToken,
-              status: "Submitted",
-              sqlText: sqlText,
-              resultKey: resultKey,
-              queryKey: queryKey,
-              taskId: taskId,
-              rowCount: 0,
-              context: securityCheck.context,
-              references: securityCheck.references,
-              securityMode: securityCheck.policyMode
-            });
+            var performResult = null;
+            var taskId = null;
+            if (!body.prepareOnly) {
+              performResult = startQueryDefinition({ CustomerKey: queryKey });
+              taskId = extractTaskId(performResult);
+            }
+            var auditSubmitResult = { Status: "Skipped", StatusMessage: "Submit audit is deferred to completion to avoid CloudPage timeout." };
             Write(apiOk({
               runToken: runToken,
               queryKey: queryKey,
               queryName: queryName,
-              queryObjectId: qd.ObjectID,
+              queryObjectId: null,
               resultKey: resultKey,
               resultName: resultName,
               resultFolderId: folderInfo ? folderInfo.ID : null,
               resultFolderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
-              queryFolderId: queryFolderInfo ? queryFolderInfo.ID : ensurePlaygroundQueryFolderId(),
+              queryFolderId: queryFolderInfo ? queryFolderInfo.ID : null,
               queryFolderName: queryFolderInfo ? queryFolderInfo.Name : "AcademyMCEPlayground",
               retentionDays: usedRetention ? 21 : null,
               retentionPolicy: usedRetention ? "All records and data extensions" : "Not applied",
@@ -2282,6 +2254,7 @@ if (isApiRequest) {
                 descriptionFields: ["CreatedUTC", "ExpiresUTC", "Source"]
               },
               columns: derived.columns,
+              preparedOnly: !!body.prepareOnly,
               performResult: performResult,
               taskId: taskId
             }));
@@ -2301,6 +2274,29 @@ if (isApiRequest) {
       Write(apiFail("submitQueryDefinitionRun failed.", {
         step: "submit_query_definition_run",
         message: String(submitErr)
+      }));
+    }
+  } else if (body.action === "startPreparedQueryDefinitionRun") {
+    try {
+      var preparedQueryKey = ssjsTrim(String(body.queryKey || ""));
+      if (!preparedQueryKey) {
+        Write(apiFail("QueryDefinition CustomerKey is required.", {
+          step: "start_prepared_query_definition"
+        }));
+      } else {
+        var preparedPerformResult = startQueryDefinition({ CustomerKey: preparedQueryKey });
+        var preparedTaskId = extractTaskId(preparedPerformResult);
+        Write(apiOk({
+          queryKey: preparedQueryKey,
+          performResult: preparedPerformResult,
+          taskId: preparedTaskId
+        }));
+      }
+    } catch (startPreparedErr) {
+      Write(apiFail("startPreparedQueryDefinitionRun failed.", {
+        step: "start_prepared_query_definition",
+        queryKey: body.queryKey || "",
+        message: String(startPreparedErr)
       }));
     }
   } else if (body.action === "getQueryDefinitionStatus") {
@@ -4073,7 +4069,7 @@ window.runRetentionDiagnostic = runRetentionDiagnostic;
 
 async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
-  const debugPayload = { action: 'submitQueryDefinitionRun', sql };
+  const debugPayload = { action: 'submitQueryDefinitionRun', sql, prepareOnly: true };
   startRemoteRunUi('queued', 'Submitting query to SFMC…');
   logRemoteStep('query_definition:sql', sql);
   logRemoteStep('query_definition:start', {
@@ -4103,7 +4099,28 @@ async function runRemoteQueryDefinition(sql, options = {}) {
   }
 
   const submitted = submit.json.data;
-  const taskId = submitted.taskId;
+  let taskId = submitted.taskId;
+  if (submitted.preparedOnly) {
+    setRemoteRunPhase('queued', `Prepared ${submitted.queryKey}. Starting SFMC Query Activity...`);
+    const startResp = await postApi({
+      action: 'startPreparedQueryDefinitionRun',
+      queryKey: submitted.queryKey
+    });
+    logRemoteStep('query_definition:start_prepared', {
+      status: startResp.res.status,
+      ok: startResp.res.ok,
+      bodyPreview: startResp.raw.slice(0, 220)
+    });
+    if (!startResp.json) {
+      throw new Error(`startPreparedQueryDefinitionRun returned HTTP ${startResp.res.status} ${startResp.res.statusText}. Response starts with: ${startResp.raw.slice(0, 160)}`);
+    }
+    if (!startResp.json.ok) {
+      throw new Error(startResp.json.error?.message || 'startPreparedQueryDefinitionRun failed.');
+    }
+    taskId = startResp.json.data.taskId;
+    submitted.taskId = taskId;
+    submitted.performResult = startResp.json.data.performResult;
+  }
   if (!taskId) {
     throw new Error('QueryDefinition was submitted but no TaskID was returned.');
   }
