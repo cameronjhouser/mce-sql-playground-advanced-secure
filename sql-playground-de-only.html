@@ -149,7 +149,8 @@ function getOAuthConfig() {
   };
 
   try {
-    var rows = Platform.Function.LookupRows(SECURITY_OAUTH_CONFIG_DE_KEY, "ConfigKey", SECURITY_OAUTH_CONFIG_ROW_KEY) || [];
+    var configKey = ensureOAuthConfigDataExtension();
+    var rows = Platform.Function.LookupRows(configKey, "ConfigKey", SECURITY_OAUTH_CONFIG_ROW_KEY) || [];
     if (rows.length) {
       var row = rows[0];
       config.exists = true;
