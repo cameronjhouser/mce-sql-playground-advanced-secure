@@ -38,6 +38,7 @@ function trimBrackets(value) {
 }
 
 var SECURITY_POLICY_DE_KEY = "AcademyMCEPlayground_AccessPolicy";
+var AUDIT_DE_KEY = "AcademyMCEPlayground_QueryAudit";
 var SECURITY_REQUIRE_ACCESS_POLICY = false;
 var SECURITY_TEMP_PREFIXES = ["QP_SRC_", "QP_RES_"];
 var SECURITY_DEFAULT_BLOCKED_FIELDS = ["password", "ssn", "socialsecurity", "token", "secret", "apikey", "api_key"];
@@ -660,6 +661,79 @@ function getExecutionAuditMetadata(sqlText, resultKey) {
     QueryText: truncateForDescription(sqlText || "", 700),
     RowCount: "Pending"
   };
+}
+
+function ensureAuditDataExtension() {
+  var existing = getDeMetaByName(AUDIT_DE_KEY);
+  if (existing && existing.CustomerKey) return existing.CustomerKey;
+
+  var prox = new Script.Util.WSProxy();
+  var folderId = ensurePlaygroundFolderId();
+  prox.createItem("DataExtension", {
+    CustomerKey: AUDIT_DE_KEY,
+    Name: AUDIT_DE_KEY,
+    Description: "Permanent audit log for Academy MCE SQL Playground query runs.",
+    CategoryID: folderId,
+    IsSendable: false,
+    Fields: [
+      { Name: "AuditId", FieldType: "Text", MaxLength: 36, IsRequired: true, IsPrimaryKey: true },
+      { Name: "RunId", FieldType: "Text", MaxLength: 36, IsRequired: false },
+      { Name: "EventUTC", FieldType: "Date", IsRequired: false },
+      { Name: "Status", FieldType: "Text", MaxLength: 40, IsRequired: false },
+      { Name: "RunnerID", FieldType: "Text", MaxLength: 100, IsRequired: false },
+      { Name: "BusinessUnitID", FieldType: "Text", MaxLength: 50, IsRequired: false },
+      { Name: "SecurityMode", FieldType: "Text", MaxLength: 50, IsRequired: false },
+      { Name: "ReferencedObjects", FieldType: "Text", MaxLength: 4000, IsRequired: false },
+      { Name: "QueryText", FieldType: "Text", MaxLength: 4000, IsRequired: false },
+      { Name: "ResultDE", FieldType: "Text", MaxLength: 100, IsRequired: false },
+      { Name: "QueryKey", FieldType: "Text", MaxLength: 100, IsRequired: false },
+      { Name: "TaskID", FieldType: "Text", MaxLength: 50, IsRequired: false },
+      { Name: "RowCount", FieldType: "Number", IsRequired: false },
+      { Name: "ErrorMessage", FieldType: "Text", MaxLength: 4000, IsRequired: false }
+    ]
+  });
+  return AUDIT_DE_KEY;
+}
+
+function safeStringifyForAudit(value, maxLength) {
+  var text = "";
+  try {
+    text = typeof value === "string" ? value : Platform.Function.Stringify(value);
+  } catch (e) {
+    text = String(value || "");
+  }
+  return truncateForDescription(text, maxLength || 4000);
+}
+
+function writeQueryAuditEvent(config) {
+  var context = config.context || getCurrentSecurityContext();
+  var auditKey = ensureAuditDataExtension();
+  var auditDe = DataExtension.Init(auditKey);
+  var row = {
+    AuditId: Platform.Function.GUID(),
+    RunId: config.runId || "",
+    EventUTC: formatRetentionDate(0),
+    Status: config.status || "Unknown",
+    RunnerID: context.runnerId || "Unknown",
+    BusinessUnitID: context.businessUnitId || "Unknown",
+    SecurityMode: config.securityMode || "",
+    ReferencedObjects: safeStringifyForAudit(config.references || [], 4000),
+    QueryText: safeStringifyForAudit(config.sqlText || "", 4000),
+    ResultDE: config.resultKey || "",
+    QueryKey: config.queryKey || "",
+    TaskID: config.taskId || "",
+    RowCount: Number(config.rowCount || 0),
+    ErrorMessage: safeStringifyForAudit(config.errorMessage || "", 4000)
+  };
+  return auditDe.Rows.Add(row);
+}
+
+function safeWriteQueryAuditEvent(config) {
+  try {
+    return writeQueryAuditEvent(config || {});
+  } catch (e) {
+    return { Status: "Error", StatusMessage: String(e) };
+  }
 }
 
 function createTempResultDataExtension(resultKey, resultName, columns) {
@@ -1298,6 +1372,15 @@ if (isApiRequest) {
       } else {
         var securityCheck = enforceQuerySecurity(sqlText);
         if (!securityCheck.ok) {
+          safeWriteQueryAuditEvent({
+            runId: Platform.Function.GUID(),
+            status: "Blocked",
+            sqlText: sqlText,
+            errorMessage: securityCheck.message || "Query blocked by playground security policy.",
+            context: securityCheck.context || getCurrentSecurityContext(),
+            references: securityCheck.object ? [securityCheck.object] : [],
+            securityMode: "blocked"
+          });
           Write(apiFail(securityCheck.message || "Query blocked by playground security policy.", {
             step: "security_policy",
             context: securityCheck.context || null,
@@ -1306,6 +1389,15 @@ if (isApiRequest) {
         } else {
         var derived = deriveResultColumns(sqlText);
         if (!derived.ok) {
+          safeWriteQueryAuditEvent({
+            runId: Platform.Function.GUID(),
+            status: "ValidationFailed",
+            sqlText: sqlText,
+            errorMessage: derived.message,
+            context: securityCheck.context,
+            references: securityCheck.references,
+            securityMode: securityCheck.policyMode
+          });
           Write(apiFail(derived.message, {
             step: "derive_result_columns",
             expression: derived.expression || null
@@ -1329,6 +1421,17 @@ if (isApiRequest) {
           var retentionErrorMessage = null;
 
           if (deCreate && deCreate.Status && String(deCreate.Status).toLowerCase() === "error") {
+            safeWriteQueryAuditEvent({
+              runId: runToken,
+              status: "Failed",
+              sqlText: sqlText,
+              resultKey: resultKey,
+              queryKey: queryKey,
+              errorMessage: extractCreateErrorMessage(deCreate),
+              context: securityCheck.context,
+              references: securityCheck.references,
+              securityMode: securityCheck.policyMode
+            });
             Write(apiFail("Temporary result Data Extension creation failed.", {
               step: "create_temp_result_de",
               resultKey: resultKey,
@@ -1360,6 +1463,17 @@ if (isApiRequest) {
           var qd = getQueryDefinitionByKey(queryKey);
 
           if (!qd || !qd.ObjectID) {
+            safeWriteQueryAuditEvent({
+              runId: runToken,
+              status: "Failed",
+              sqlText: sqlText,
+              resultKey: resultKey,
+              queryKey: queryKey,
+              errorMessage: "QueryDefinition was created but could not be retrieved for execution.",
+              context: securityCheck.context,
+              references: securityCheck.references,
+              securityMode: securityCheck.policyMode
+            });
             Write(apiFail("QueryDefinition was created but could not be retrieved for execution.", {
               step: "retrieve_query_definition",
               queryKey: queryKey,
@@ -1369,6 +1483,18 @@ if (isApiRequest) {
           } else {
             var performResult = performQueryDefinition(qd.ObjectID);
             var taskId = extractTaskId(performResult);
+            var auditSubmitResult = safeWriteQueryAuditEvent({
+              runId: runToken,
+              status: "Submitted",
+              sqlText: sqlText,
+              resultKey: resultKey,
+              queryKey: queryKey,
+              taskId: taskId,
+              rowCount: 0,
+              context: securityCheck.context,
+              references: securityCheck.references,
+              securityMode: securityCheck.policyMode
+            });
             Write(apiOk({
               runToken: runToken,
               queryKey: queryKey,
@@ -1390,6 +1516,7 @@ if (isApiRequest) {
               resultDescription: resultDescription,
               queryDescription: queryDescription,
               auditMetadata: auditMeta,
+              auditLogResult: auditSubmitResult,
               security: {
                 mode: securityCheck.policyMode,
                 context: securityCheck.context,
@@ -1411,6 +1538,13 @@ if (isApiRequest) {
         }
       }
     } catch (submitErr) {
+      safeWriteQueryAuditEvent({
+        runId: Platform.Function.GUID(),
+        status: "Exception",
+        sqlText: body.sql || "",
+        errorMessage: String(submitErr),
+        securityMode: "exception"
+      });
       Write(apiFail("submitQueryDefinitionRun failed.", {
         step: "submit_query_definition_run",
         message: String(submitErr)
@@ -1467,6 +1601,17 @@ if (isApiRequest) {
           RowCount: resultValues.length
         }
       ));
+      var completionAuditResult = safeWriteQueryAuditEvent({
+        runId: body.runToken || "",
+        status: "Complete",
+        sqlText: body.queryText || "",
+        resultKey: body.resultKey || "",
+        queryKey: body.queryKey || "",
+        taskId: body.taskId || "",
+        rowCount: resultValues.length,
+        references: extractSqlObjectReferences(body.queryText || ""),
+        securityMode: body.securityMode || ""
+      });
 
       if (resultFormat === "rows") {
         Write(apiOk({
@@ -1474,6 +1619,7 @@ if (isApiRequest) {
           resultKey: body.resultKey || "",
           format: "rows",
           rowCount: rowObjects.length,
+          auditLogResult: completionAuditResult,
           columns: body.columns || [],
           rows: rowObjects
         }));
@@ -1483,11 +1629,23 @@ if (isApiRequest) {
           resultKey: body.resultKey || "",
           format: "table",
           rowCount: resultValues.length,
+          auditLogResult: completionAuditResult,
           columns: body.columns || [],
           values: resultValues
         }));
       }
     } catch (resultsErr) {
+      safeWriteQueryAuditEvent({
+        runId: body.runToken || "",
+        status: "ResultFetchFailed",
+        sqlText: body.queryText || "",
+        resultKey: body.resultKey || "",
+        queryKey: body.queryKey || "",
+        taskId: body.taskId || "",
+        errorMessage: String(resultsErr),
+        references: extractSqlObjectReferences(body.queryText || ""),
+        securityMode: body.securityMode || ""
+      });
       Write(apiFail("getQueryDefinitionResults failed.", {
         step: "get_query_definition_results",
         resultKey: body.resultKey || "",
@@ -3118,6 +3276,10 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     resultKey: submitted.resultKey,
     columns: submitted.columns,
     queryText: sql,
+    runToken: submitted.runToken,
+    queryKey: submitted.queryKey,
+    taskId: submitted.taskId,
+    securityMode: submitted.security?.mode || '',
     format: resultFormat
   });
   setRemoteRunPhase('fetching', `Loading results from ${submitted.resultKey}…`);
