@@ -2718,13 +2718,13 @@ if (isApiRequest) {
           var resultName = "QP_RES_" + shortToken;
           var queryKey = "QP_QRY_" + shortToken;
           var queryName = "QP_QRY_" + shortToken;
-          var queryFolderInfo = null;
+          var queryFolderInfo = getPlaygroundQueryFolder();
 
           var auditMeta = getExecutionAuditMetadata(sqlText, resultKey);
           var resultDescription = buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "result DE", auditMeta);
           var queryDescription = buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "query definition", auditMeta);
           var deCreate = createTempResultDataExtension(resultKey, resultName, derived.columns);
-          var folderInfo = null;
+          var folderInfo = getPlaygroundFolder();
           var retentionUpdate = null;
           var usedRetention = false;
           var retentionErrorMessage = "Retention update deferred to a follow-up request to avoid CloudPage timeout.";
@@ -2754,6 +2754,7 @@ if (isApiRequest) {
               deCreate: deCreate
             }));
           } else {
+          updateDataExtensionDescription(resultKey, resultDescription);
           var qdCreate = createTempQueryDefinition(queryKey, queryName, sqlText, resultKey, resultName);
 
           if (qdCreate && qdCreate.Status && String(qdCreate.Status).toLowerCase() === "error") {
@@ -2775,6 +2776,13 @@ if (isApiRequest) {
               qdCreate: qdCreate
             }));
           } else {
+            try {
+              var proxQdDesc = new Script.Util.WSProxy();
+              proxQdDesc.updateItem("QueryDefinition", {
+                CustomerKey: queryKey,
+                Description: queryDescription
+              });
+            } catch (descErr) {}
             var qdCreateObjectId = extractCreatedObjectId(qdCreate);
             var qd = getQueryDefinitionByKeyWithRetry(queryKey, 5, 500);
             if ((!qd || !qd.ObjectID) && qdCreateObjectId) {
@@ -4921,7 +4929,7 @@ async function runSQL() {
         '<tr>' + row.map(cell => `<td>${cell === null ? '<em style="color:#3a5a7a">NULL</em>' : esc(String(cell))}</td>`).join('') + '</tr>'
       ).join('');
       setResults(
-        `${previewNote} Â· ${columns.length} cols Â· ${ms}ms Â· DE ${esc(remote.dataExtension)}`,
+        `${previewNote} · ${columns.length} cols · ${ms}ms · DE ${esc(remote.dataExtension)}`,
         `<table class="results-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`,
         { columns, values }
       );
