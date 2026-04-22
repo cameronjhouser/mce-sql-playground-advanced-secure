@@ -1149,9 +1149,10 @@ function getDeFieldNames(customerKey) {
   return names;
 }
 
-function retrieveDeRowsByName(name, columns) {
+function retrieveDeRowsByName(name, columns, limitCount) {
   var sortField = columns && columns.length ? columns[0] : "_CustomObjectKey";
-  var resp = Platform.Function.LookupOrderedRows(name, 2500, sortField + " ASC") || [];
+  var rowLimit = Math.max(1, Math.min(2500, parseInt(limitCount, 10) || 2500));
+  var resp = Platform.Function.LookupOrderedRows(name, rowLimit, sortField + " ASC") || [];
   var rows = [];
 
   for (var i = 0; i < resp.length; i++) {
@@ -3103,7 +3104,10 @@ if (isApiRequest) {
           if (directColumns.length === 1 && directColumns[0] === "*") {
             directColumns = getDeFieldNames(directParsed.deName);
           }
-          var directRows = retrieveDeRowsViaWSProxy(directParsed.deName, directColumns, directParsed.limitCount || 0);
+          var directLimit = Math.max(0, parseInt(directParsed.limitCount, 10) || 0);
+          var directRows = directLimit && directLimit <= 2500
+            ? retrieveDeRowsByName(directParsed.deName, directColumns, directLimit)
+            : retrieveDeRowsViaWSProxy(directParsed.deName, directColumns, directLimit);
           var directValues = [];
           var directObjects = [];
           for (var dr = 0; dr < directRows.length; dr++) {
