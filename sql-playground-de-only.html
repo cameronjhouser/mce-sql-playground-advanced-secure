@@ -2501,7 +2501,7 @@ if (isApiRequest) {
           resultKey: authorizedResultKey
         }));
       } else {
-        var authorizedQdCreate = createFastTempQueryDefinition(authorizedQdKey, authorizedQdName, authorizedQdSql, authorizedResultKey, authorizedResultName);
+        var authorizedQdCreate = createTempQueryDefinition(authorizedQdKey, authorizedQdName, authorizedQdSql, authorizedResultKey, authorizedResultName);
         if (authorizedQdCreate && authorizedQdCreate.Status && String(authorizedQdCreate.Status).toLowerCase() === "error") {
           Write(apiFail("Temporary QueryDefinition creation failed.", {
             step: "create_authorized_prepared_query_definition",
