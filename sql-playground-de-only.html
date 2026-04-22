@@ -45,6 +45,7 @@ var SECURITY_DEFAULT_BLOCKED_FIELDS = ["password", "ssn", "socialsecurity", "tok
 var SECURITY_OAUTH_CONFIG_DE_KEY = "AcademyMCEPlayground_OAuthConfig";
 var SECURITY_OAUTH_CONFIG_ROW_KEY = "DEFAULT";
 var SECURITY_OAUTH_SESSION_DE_KEY = "AcademyMCEPlayground_OAuthSessions";
+var SECURITY_DATA_EXTENSION_FOLDER_NAME = "AcademyMCEPlayground Security";
 
 // Reliable Marketing Cloud user login.
 // Create an Installed Package > API Integration > Web App, then store values in
@@ -120,10 +121,13 @@ function getOAuthConfigFieldDefinitions() {
 
 function ensureOAuthConfigDataExtension() {
   var existing = getDeMetaByName(SECURITY_OAUTH_CONFIG_DE_KEY);
-  if (existing && existing.CustomerKey) return existing.CustomerKey;
+  if (existing && existing.CustomerKey) {
+    moveDataExtensionToFolderIfNeeded(existing.CustomerKey, ensureSecurityDataExtensionFolderId(), existing.CategoryID);
+    return existing.CustomerKey;
+  }
 
   var prox = new Script.Util.WSProxy();
-  var folderId = ensurePlaygroundFolderId();
+  var folderId = ensureSecurityDataExtensionFolderId();
   prox.createItem("DataExtension", {
     CustomerKey: SECURITY_OAUTH_CONFIG_DE_KEY,
     Name: SECURITY_OAUTH_CONFIG_DE_KEY,
@@ -304,11 +308,12 @@ function ensureOAuthSessionDataExtension() {
   var existing = getDeMetaByName(SECURITY_OAUTH_SESSION_DE_KEY);
   if (existing && existing.CustomerKey) {
     ensureOAuthSessionDataExtensionFields(existing.CustomerKey);
+    moveDataExtensionToFolderIfNeeded(existing.CustomerKey, ensureSecurityDataExtensionFolderId(), existing.CategoryID);
     return existing.CustomerKey;
   }
 
   var prox = new Script.Util.WSProxy();
-  var folderId = ensurePlaygroundFolderId();
+  var folderId = ensureSecurityDataExtensionFolderId();
   prox.createItem("DataExtension", {
     CustomerKey: SECURITY_OAUTH_SESSION_DE_KEY,
     Name: SECURITY_OAUTH_SESSION_DE_KEY,
@@ -722,11 +727,12 @@ function ensureAccessPolicyDataExtension() {
   var existing = getDeMetaByName(SECURITY_POLICY_DE_KEY);
   if (existing && existing.CustomerKey) {
     ensureAccessPolicyDataExtensionFields(existing.CustomerKey);
+    moveDataExtensionToFolderIfNeeded(existing.CustomerKey, ensureSecurityDataExtensionFolderId(), existing.CategoryID);
     return existing.CustomerKey;
   }
 
   var prox = new Script.Util.WSProxy();
-  var folderId = ensurePlaygroundFolderId();
+  var folderId = ensureSecurityDataExtensionFolderId();
   prox.createItem("DataExtension", {
     CustomerKey: SECURITY_POLICY_DE_KEY,
     Name: SECURITY_POLICY_DE_KEY,
@@ -1353,6 +1359,68 @@ function ensurePlaygroundFolderId() {
   return parentId || 0;
 }
 
+function getSecurityDataExtensionFolder() {
+  var prox = new Script.Util.WSProxy();
+  var resp = prox.retrieve("DataFolder", ["ID", "Name", "ContentType", "ParentFolder.ID"], {
+    LeftOperand: {
+      Property: "Name",
+      SimpleOperator: "equals",
+      Value: SECURITY_DATA_EXTENSION_FOLDER_NAME
+    },
+    LogicalOperator: "AND",
+    RightOperand: {
+      Property: "ContentType",
+      SimpleOperator: "equals",
+      Value: "dataextension"
+    }
+  });
+
+  if (resp && resp.Results && resp.Results.length) {
+    return resp.Results[0];
+  }
+  return null;
+}
+
+function createSecurityDataExtensionFolder(parentId) {
+  var prox = new Script.Util.WSProxy();
+  return prox.createItem("DataFolder", {
+    Name: SECURITY_DATA_EXTENSION_FOLDER_NAME,
+    Description: "Permanent security configuration, OAuth session, and audit Data Extensions for Academy MCE SQL Playground",
+    ContentType: "dataextension",
+    IsActive: true,
+    IsEditable: true,
+    AllowChildren: true,
+    ParentFolder: { ID: parentId || 0 }
+  });
+}
+
+function ensureSecurityDataExtensionFolderId() {
+  var existing = getSecurityDataExtensionFolder();
+  if (existing && existing.ID) return existing.ID;
+
+  var parentId = getDataExtensionRootFolderId();
+  createSecurityDataExtensionFolder(parentId);
+
+  var created = getSecurityDataExtensionFolder();
+  if (created && created.ID) return created.ID;
+
+  return parentId || 0;
+}
+
+function moveDataExtensionToFolderIfNeeded(customerKey, folderId, currentCategoryId) {
+  if (!customerKey || !folderId) return null;
+  if (String(currentCategoryId || "") === String(folderId)) return { Status: "Skipped", StatusMessage: "Data Extension already in target folder." };
+  try {
+    var prox = new Script.Util.WSProxy();
+    return prox.updateItem("DataExtension", {
+      CustomerKey: customerKey,
+      CategoryID: folderId
+    });
+  } catch (e) {
+    return { Status: "Error", StatusMessage: String(e) };
+  }
+}
+
 function getQueryActivityRootFolderId() {
   var prox = new Script.Util.WSProxy();
   var resp = prox.retrieve("DataFolder", ["ID", "Name", "ContentType", "ParentFolder.ID"], {
@@ -1498,11 +1566,12 @@ function ensureAuditDataExtension() {
   var existing = getDeMetaByName(AUDIT_DE_KEY);
   if (existing && existing.CustomerKey) {
     ensureAuditDataExtensionFields(existing.CustomerKey);
+    moveDataExtensionToFolderIfNeeded(existing.CustomerKey, ensureSecurityDataExtensionFolderId(), existing.CategoryID);
     return existing.CustomerKey;
   }
 
   var prox = new Script.Util.WSProxy();
-  var folderId = ensurePlaygroundFolderId();
+  var folderId = ensureSecurityDataExtensionFolderId();
   prox.createItem("DataExtension", {
     CustomerKey: AUDIT_DE_KEY,
     Name: AUDIT_DE_KEY,
@@ -2339,6 +2408,7 @@ if (isApiRequest) {
           });
 
           Write(apiOk({
+            runToken: stageToken,
             localName: localName,
             sourceKey: sourceKey,
             sourceName: sourceName,
@@ -2386,9 +2456,19 @@ if (isApiRequest) {
         }));
       } else {
         var appendedCount = insertRowsIntoDataExtension(appendSourceKey, appendRows, appendFieldSettings);
+        var appendAuditResult = safeWriteQueryAuditEvent({
+          runId: body.runId || Platform.Function.GUID(),
+          status: "TempSourceRowsAppended",
+          resultKey: appendSourceKey,
+          rowCount: appendedCount,
+          context: getCurrentSecurityContext(),
+          references: [{ raw: appendSourceKey, name: appendSourceKey, type: "TEMP_DE_APPEND" }],
+          securityMode: "temp_de"
+        });
         Write(apiOk({
           sourceKey: appendSourceKey,
-          appendedRowCount: appendedCount
+          appendedRowCount: appendedCount,
+          auditLogResult: appendAuditResult
         }));
       }
     } catch (appendErr) {
@@ -2448,6 +2528,15 @@ if (isApiRequest) {
   } else if (body.action === "auditClientEvent") {
     try {
       var auditStatus = ssjsTrim(String(body.status || "ClientEvent"));
+      var auditIsDownload = auditStatus === "DownloadCSV" || auditStatus === "DownloadJSON";
+      var auditPermission = auditIsDownload ? requirePolicyPermission("canDownloadData") : { ok: true };
+      if (!auditPermission.ok) {
+        Write(apiFail(auditPermission.message || "Download audit is not allowed for this user.", {
+          step: "download_permission_required",
+          permission: "CanDownloadData",
+          status: auditStatus
+        }));
+      } else {
       var auditResult = safeWriteQueryAuditEvent({
         runId: body.runId || Platform.Function.GUID(),
         status: auditStatus,
@@ -2464,6 +2553,7 @@ if (isApiRequest) {
         status: auditStatus,
         auditLogResult: auditResult
       }));
+      }
     } catch (auditClientErr) {
       Write(apiFail("auditClientEvent failed.", {
         step: "audit_client_event",
@@ -2808,7 +2898,19 @@ if (isApiRequest) {
                 performResult = performQueryDefinition(qd.ObjectID);
                 taskId = extractTaskId(performResult);
               }
-              var auditSubmitResult = { Status: "Skipped", StatusMessage: "Submit audit is deferred to completion to avoid CloudPage timeout." };
+              var auditSubmitResult = safeWriteQueryAuditEvent({
+                runId: runToken,
+                status: body.prepareOnly ? "QueryDefinitionPrepared" : "QueryDefinitionSubmitted",
+                sqlText: sqlText,
+                resultKey: resultKey,
+                queryKey: queryKey,
+                taskId: taskId || "",
+                rowCount: 0,
+                context: securityCheck.context,
+                references: extractSqlObjectReferences(sqlText),
+                securityMode: securityCheck.policyMode,
+                errorMessage: taskId || body.prepareOnly ? "" : "QueryDefinition started but no TaskID was returned."
+              });
               Write(apiOk({
                 runToken: runToken,
                 queryKey: queryKey,
@@ -3909,12 +4011,12 @@ function getRetentionFallbackWarning(remote) {
   return buildRetentionWarningText(remote);
 }
 
-function auditDownloadEvent(format, csvData) {
+async function auditDownloadEvent(format, csvData) {
   try {
     const cur = tabs.find(t => t.id === activeTabId);
     const columns = (csvData && csvData.columns) || [];
     const values = (csvData && csvData.values) || [];
-    postApi({
+    const resp = await postApi({
       action: 'auditClientEvent',
       status: format === 'json' ? 'DownloadJSON' : 'DownloadCSV',
       runId: (csvData && csvData.runToken) || '',
@@ -3931,21 +4033,23 @@ function auditDownloadEvent(format, csvData) {
         columnCount: columns.length
       }],
       securityMode: 'download'
-    }).then(resp => {
-      logRemoteStep('audit:download', {
-        format,
-        status: resp.res.status,
-        ok: resp.res.ok
-      });
-    }).catch(err => {
-      logRemoteStep('audit:download_error', String(err));
     });
+    logRemoteStep('audit:download', {
+      format,
+      status: resp.res.status,
+      ok: resp.res.ok,
+      bodyPreview: resp.raw ? resp.raw.slice(0, 180) : ''
+    });
+    if (!resp.json || !resp.json.ok) {
+      throw new Error(resp.json?.error?.message || `Download audit failed with HTTP ${resp.res.status}.`);
+    }
   } catch (err) {
     logRemoteStep('audit:download_error', String(err));
+    throw err;
   }
 }
 
-function downloadCSV() {
+async function downloadCSV() {
   const cur = tabs.find(t => t.id === activeTabId);
   const csvData = cur && cur.results && cur.results.csvData;
   if (!csvData) return;
@@ -3953,7 +4057,12 @@ function downloadCSV() {
     showError('CanDownloadData permission is required to download result data.');
     return;
   }
-  auditDownloadEvent('csv', csvData);
+  try {
+    await auditDownloadEvent('csv', csvData);
+  } catch (auditErr) {
+    showError(`Download audit failed: ${auditErr.message}`);
+    return;
+  }
   const { columns, values } = csvData;
   const escape = v => {
     if (v === null || v === undefined) return '';
@@ -3970,7 +4079,7 @@ function downloadCSV() {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-function downloadJSON() {
+async function downloadJSON() {
   const cur = tabs.find(t => t.id === activeTabId);
   const csvData = cur && cur.results && cur.results.csvData;
   if (!csvData) return;
@@ -3978,7 +4087,12 @@ function downloadJSON() {
     showError('CanDownloadData permission is required to download result data.');
     return;
   }
-  auditDownloadEvent('json', csvData);
+  try {
+    await auditDownloadEvent('json', csvData);
+  } catch (auditErr) {
+    showError(`Download audit failed: ${auditErr.message}`);
+    return;
+  }
   const columns = csvData.columns || [];
   const values = csvData.values || [];
   const rows = values.map(row => {
@@ -4347,6 +4461,7 @@ async function createTempDEFromCsv(tableName) {
       const chunkResp = await postApi({
         action: 'appendTempSourceRows',
         sourceKey: stageData.sourceKey,
+        runId: stageData.runToken || stageData.sourceKey,
         fieldSettings: de.fieldSettings,
         rows: chunk
       });
@@ -4872,6 +4987,32 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     sampleRow: resultData.values && resultData.values.length ? resultData.values[0] :
       ((resultData.rows && resultData.rows.length) ? resultData.rows[0] : null)
   });
+
+  try {
+    const resultAuditResp = await postApi({
+      action: 'auditClientEvent',
+      status: 'QueryDefinitionResultsLoaded',
+      runId: submitted.runToken,
+      resultKey: submitted.resultKey,
+      queryKey: submitted.queryKey,
+      taskId: submitted.taskId,
+      queryText: sql,
+      rowCount: resultData.rowCount,
+      references: [{
+        raw: submitted.resultKey,
+        name: submitted.resultKey,
+        type: 'QUERY_DEFINITION_RESULT'
+      }],
+      securityMode: submitted.security?.mode || 'query_definition'
+    });
+    logRemoteStep('audit:query_results_loaded', {
+      status: resultAuditResp.res.status,
+      ok: resultAuditResp.res.ok,
+      bodyPreview: resultAuditResp.raw.slice(0, 180)
+    });
+  } catch (resultAuditErr) {
+    logRemoteStep('audit:query_results_loaded_error', String(resultAuditErr));
+  }
 
   if (submitted.queryObjectId || submitted.queryKey) {
     try {
