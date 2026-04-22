@@ -2647,52 +2647,62 @@ if (isApiRequest) {
               qdCreate: qdCreate
             }));
           } else {
-            var performResult = null;
-            var taskId = null;
-            if (!body.prepareOnly) {
-              performResult = startQueryDefinition({ CustomerKey: queryKey });
-              taskId = extractTaskId(performResult);
+            var qd = getQueryDefinitionByKey(queryKey);
+            if (!qd || !qd.ObjectID) {
+              Write(apiFail("QueryDefinition was created but could not be retrieved for execution.", {
+                step: "retrieve_query_definition",
+                queryKey: queryKey,
+                deCreate: deCreate,
+                qdCreate: qdCreate
+              }));
+            } else {
+              var performResult = null;
+              var taskId = null;
+              if (!body.prepareOnly) {
+                performResult = performQueryDefinition(qd.ObjectID);
+                taskId = extractTaskId(performResult);
+              }
+              var auditSubmitResult = { Status: "Skipped", StatusMessage: "Submit audit is deferred to completion to avoid CloudPage timeout." };
+              Write(apiOk({
+                runToken: runToken,
+                queryKey: queryKey,
+                queryName: queryName,
+                queryObjectId: qd.ObjectID,
+                resultKey: resultKey,
+                resultName: resultName,
+                resultFolderId: folderInfo ? folderInfo.ID : null,
+                resultFolderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
+                queryFolderId: queryFolderInfo ? queryFolderInfo.ID : null,
+                queryFolderName: queryFolderInfo ? queryFolderInfo.Name : "AcademyMCEPlayground",
+                retentionDays: usedRetention ? 21 : null,
+                retentionPolicy: usedRetention ? "All records and data extensions" : "Not applied",
+                retentionRequestedDays: 21,
+                retentionRequestedPolicy: "All records and data extensions",
+                retentionFallbackUsed: !usedRetention,
+                retentionErrorMessage: retentionErrorMessage,
+                retentionUpdateResult: retentionUpdate,
+                retentionDeferred: true,
+                resultDescription: resultDescription,
+                queryDescription: queryDescription,
+                auditMetadata: auditMeta,
+                auditLogResult: auditSubmitResult,
+                security: {
+                  mode: securityCheck.policyMode,
+                  context: securityCheck.context,
+                  references: securityCheck.references
+                },
+                cleanupMetadata: {
+                  folderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
+                  resultPrefix: "QP_RES_",
+                  queryPrefix: "QP_QRY_",
+                  descriptionFields: ["CreatedUTC", "ExpiresUTC", "Source"]
+                },
+                columns: derived.columns,
+                preparedOnly: !!body.prepareOnly,
+                performResult: performResult,
+                taskId: taskId
+              }));
             }
-            var auditSubmitResult = { Status: "Skipped", StatusMessage: "Submit audit is deferred to completion to avoid CloudPage timeout." };
-            Write(apiOk({
-              runToken: runToken,
-              queryKey: queryKey,
-              queryName: queryName,
-              queryObjectId: null,
-              resultKey: resultKey,
-              resultName: resultName,
-              resultFolderId: folderInfo ? folderInfo.ID : null,
-              resultFolderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
-              queryFolderId: queryFolderInfo ? queryFolderInfo.ID : null,
-              queryFolderName: queryFolderInfo ? queryFolderInfo.Name : "AcademyMCEPlayground",
-              retentionDays: usedRetention ? 21 : null,
-              retentionPolicy: usedRetention ? "All records and data extensions" : "Not applied",
-              retentionRequestedDays: 21,
-              retentionRequestedPolicy: "All records and data extensions",
-              retentionFallbackUsed: !usedRetention,
-              retentionErrorMessage: retentionErrorMessage,
-              retentionUpdateResult: retentionUpdate,
-              retentionDeferred: true,
-              resultDescription: resultDescription,
-              queryDescription: queryDescription,
-              auditMetadata: auditMeta,
-              auditLogResult: auditSubmitResult,
-              security: {
-                mode: securityCheck.policyMode,
-                context: securityCheck.context,
-                references: securityCheck.references
-              },
-              cleanupMetadata: {
-                folderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
-                resultPrefix: "QP_RES_",
-                queryPrefix: "QP_QRY_",
-                descriptionFields: ["CreatedUTC", "ExpiresUTC", "Source"]
-              },
-              columns: derived.columns,
-              preparedOnly: !!body.prepareOnly,
-              performResult: performResult,
-              taskId: taskId
-            }));
           }
           }
         }
