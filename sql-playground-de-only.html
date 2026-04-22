@@ -908,6 +908,11 @@ function refsAreDataViewOnly(refs) {
   return true;
 }
 
+function hasOAuthSessionCookie() {
+  var sessionId = getCookieValue(SECURITY_OAUTH_COOKIE_NAME);
+  return /^[0-9a-f-]{20,}$/i.test(String(sessionId || ""));
+}
+
 function getDataFolderById(folderId) {
   try {
     var prox = new Script.Util.WSProxy();
@@ -928,7 +933,7 @@ function enforceQuerySecurity(sqlText, authGate) {
   var context = authGate && authGate.context ? authGate.context : getCurrentSecurityContext();
   var refs = extractSqlObjectReferences(sqlText);
 
-  if (isOAuthLoginEnabled() && getOAuthSession() && refsAreDataViewOnly(refs)) {
+  if (isOAuthLoginEnabled() && hasOAuthSessionCookie() && refsAreDataViewOnly(refs)) {
     return {
       ok: true,
       context: context,
