@@ -2659,11 +2659,6 @@ if (isApiRequest) {
             queryKey: preparedQdKey,
             queryName: preparedQdName,
             resultKey: preparedQdResultKey,
-            security: {
-              mode: preparedQdSecurityCheck.policyMode,
-              context: preparedQdSecurityCheck.context,
-              references: preparedQdSecurityCheck.references
-            },
             qdCreate: preparedQdCreate
           }));
         }
@@ -4859,61 +4854,36 @@ window.runRetentionDiagnostic = runRetentionDiagnostic;
 
 async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
-  startRemoteRunUi('queued', 'Preparing SFMC query run...');
+  const debugPayload = { action: 'submitQueryDefinitionRun', sql };
+  startRemoteRunUi('queued', 'Submitting query to SFMC...');
   logRemoteStep('query_definition:sql', sql);
+  logRemoteStep('query_definition:start', {
+    endpoint: window.location.pathname + '?api=1',
+    payload: debugPayload
+  });
 
-  async function postPreparedStep(payload, label) {
-    logRemoteStep(`query_definition:${label}:start`, {
-      endpoint: window.location.pathname + '?api=1',
-      payload
-    });
-    const response = await postApi(payload);
-    logRemoteStep(`query_definition:${label}:response`, {
-      status: response.res.status,
-      ok: response.res.ok,
-      bodyPreview: response.raw.slice(0, 220)
-    });
-    if (!response.json) {
-      throw new Error(`${payload.action} returned HTTP ${response.res.status} ${response.res.statusText}. Response starts with: ${response.raw.slice(0, 160)}`);
-    }
-    if (!response.json.ok) {
-      const details = response.json.error?.details || {};
-      const parts = [response.json.error?.message || `${payload.action} failed.`];
-      if (details.step) parts.push(`Step: ${details.step}`);
-      if (details.finalCreateErrorMessage) parts.push(`Create error: ${details.finalCreateErrorMessage}`);
-      if (details.message) parts.push(details.message);
-      throw new Error(parts.join(' | '));
-    }
-    return response.json.data || {};
+  const submit = await postApi(debugPayload);
+  logRemoteStep('query_definition:submit', {
+    status: submit.res.status,
+    ok: submit.res.ok,
+    body: submit.raw
+  });
+
+  if (!submit.json) {
+    throw new Error(`submitQueryDefinitionRun returned HTTP ${submit.res.status} ${submit.res.statusText}. Response starts with: ${submit.raw.slice(0, 160)}`);
+  }
+  if (!submit.json.ok) {
+    const details = submit.json.error?.details || {};
+    const parts = [submit.json.error?.message || 'submitQueryDefinitionRun failed.'];
+    if (details.step) parts.push(`Step: ${details.step}`);
+    if (details.retentionErrorMessage) parts.push(`Retention error: ${details.retentionErrorMessage}`);
+    if (details.finalCreateErrorMessage) parts.push(`Final create error: ${details.finalCreateErrorMessage}`);
+    if (details.resultFolderName) parts.push(`Folder: ${details.resultFolderName}`);
+    throw new Error(parts.join(' | '));
   }
 
-  const submitted = await postPreparedStep({ action: 'prepareLightQueryRun', sql }, 'prepare');
-  setRemoteRunPhase('queued', `Creating result Data Extension ${submitted.resultKey}...`);
-  await postPreparedStep({
-    action: 'createPreparedResultDataExtension',
-    resultKey: submitted.resultKey,
-    resultName: submitted.resultName,
-    columns: submitted.columns
-  }, 'create_result_de');
-
-  setRemoteRunPhase('queued', `Creating QueryDefinition ${submitted.queryKey}...`);
-  const createdQuery = await postPreparedStep({
-    action: 'createPreparedQueryDefinition',
-    queryKey: submitted.queryKey,
-    queryName: submitted.queryName,
-    sql,
-    resultKey: submitted.resultKey,
-    resultName: submitted.resultName
-  }, 'create_query_definition');
-  submitted.security = createdQuery.security || submitted.security || {};
-
-  setRemoteRunPhase('queued', `Starting QueryDefinition ${submitted.queryKey}...`);
-  const started = await postPreparedStep({
-    action: 'startPreparedQueryDefinitionRun',
-    queryKey: submitted.queryKey
-  }, 'start_query_definition');
-  let taskId = started.taskId;
-  submitted.taskId = taskId;
+  const submitted = submit.json.data;
+  let taskId = submitted.taskId;
   if (!taskId) {
     throw new Error('QueryDefinition was submitted but no TaskID was returned.');
   }
