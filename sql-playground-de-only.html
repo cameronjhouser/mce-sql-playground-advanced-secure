@@ -833,14 +833,11 @@ function getPolicyUserDetails(policies, context) {
     var userName = cleanPolicyIdentityValue(policy.UserName, context);
     var emailAddress = cleanPolicyIdentityValue(policy.EmailAddress, context);
     var userDisplayName = cleanPolicyIdentityValue(policy.UserDisplayName, context);
-    var businessUnitId = ssjsTrim(String(policy.AllowedMID || ""));
-    if (businessUnitId === "*") businessUnitId = "";
-    if (userName || emailAddress || userDisplayName || businessUnitId) {
+    if (userName || emailAddress || userDisplayName) {
       return {
         userName: userName,
         emailAddress: emailAddress,
-        userDisplayName: userDisplayName,
-        businessUnitId: businessUnitId
+        userDisplayName: userDisplayName
       };
     }
   }
@@ -917,13 +914,11 @@ function getSecurityPolicySummary(context, policies) {
 
 function enrichSecurityContextWithPolicy(context) {
   context = context || getCurrentSecurityContext();
+  if (context.userName || context.emailAddress || context.userDisplayName) return context;
   var details = getPolicyUserDetails(getMatchingSecurityPolicies(context), context);
-  context.userName = context.userName || details.userName || "";
-  context.emailAddress = context.emailAddress || details.emailAddress || "";
-  context.userDisplayName = context.userDisplayName || details.userDisplayName || "";
-  if ((!context.businessUnitId || normalizeSecurityValue(context.businessUnitId) === "unknown") && details.businessUnitId) {
-    context.businessUnitId = details.businessUnitId;
-  }
+  context.userName = details.userName || "";
+  context.emailAddress = details.emailAddress || "";
+  context.userDisplayName = details.userDisplayName || "";
   return context;
 }
 
@@ -2930,7 +2925,7 @@ if (isApiRequest) {
                 security: {
                   mode: securityCheck.policyMode,
                   context: securityCheck.context,
-                  references: extractSqlObjectReferences(sqlText)
+                  references: securityCheck.references
                 },
                 cleanupMetadata: {
                   folderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
@@ -2955,7 +2950,6 @@ if (isApiRequest) {
         status: "Exception",
         sqlText: body.sql || "",
         errorMessage: String(submitErr),
-        references: extractSqlObjectReferences(body.sql || ""),
         securityMode: "exception"
       });
       Write(apiFail("submitQueryDefinitionRun failed.", {
@@ -4486,29 +4480,6 @@ async function createTempDEFromCsv(tableName) {
       ok: verifyResp.res.ok,
       body: verifyResp.raw
     });
-    try {
-      const uploadAuditResp = await postApi({
-        action: 'auditClientEvent',
-        status: 'TempSourceUploadCompleted',
-        runId: stageData.runToken || stageData.sourceKey,
-        resultKey: stageData.sourceKey,
-        rowCount: insertedTotal,
-        references: [{
-          raw: tableName,
-          name: tableName,
-          type: 'CSV_UPLOAD_COMPLETE',
-          sourceKey: stageData.sourceKey
-        }],
-        securityMode: 'temp_de'
-      });
-      logRemoteStep('audit:temp_upload_completed', {
-        status: uploadAuditResp.res.status,
-        ok: uploadAuditResp.res.ok,
-        bodyPreview: uploadAuditResp.raw.slice(0, 180)
-      });
-    } catch (uploadAuditErr) {
-      logRemoteStep('audit:temp_upload_completed_error', String(uploadAuditErr));
-    }
 
     de.tempDeStatus = 'ready';
     de.tempDeError = null;
@@ -4918,7 +4889,7 @@ async function runRemoteQueryDefinition(sql, options = {}) {
       taskId: taskId,
       queryText: sql,
       rowCount: 0,
-      references: submitted.security?.references || [{
+      references: [{
         raw: submitted.queryKey || 'QueryDefinition',
         name: submitted.queryKey || 'QueryDefinition',
         type: 'QUERY_DEFINITION'
