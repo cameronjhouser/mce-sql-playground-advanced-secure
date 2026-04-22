@@ -2823,7 +2823,8 @@ if (isApiRequest) {
   } else if (body.action === "getQueryDefinitionResults") {
     try {
       var resultFormat = ssjsTrim(String(body.format || "table")).toLowerCase() === "rows" ? "rows" : "table";
-      var resultRows = retrieveDeRowsViaWSProxy(body.resultKey || "", body.columns || []);
+      var maxRows = Math.max(1, Math.min(2500, parseInt(body.maxRows, 10) || 2500));
+      var resultRows = retrieveDeRowsViaWSProxyWithLimit(body.resultKey || "", body.columns || [], maxRows);
       var resultValues = [];
       var rowObjects = [];
       for (var rr = 0; rr < resultRows.length; rr++) {
@@ -2838,32 +2839,10 @@ if (isApiRequest) {
         resultValues.push(currentRow);
         rowObjects.push(currentObject);
       }
-      var existingMeta = getDeMetaByName(body.resultKey || "");
-      var parsedDescription = parseTempAssetDescription(existingMeta && existingMeta.Description ? existingMeta.Description : "");
-      updateDataExtensionDescription(body.resultKey || "", buildTempAssetDescription(
-        parsedDescription.CreatedUTC || formatRetentionDate(0),
-        parsedDescription.ExpiresUTC || formatRetentionDate(21),
-        "result DE",
-        {
-          RunUTC: parsedDescription.RunUTC || formatRetentionDate(0),
-          RunnerID: parsedDescription.RunnerID || "Unknown",
-          BusinessUnitID: parsedDescription.BusinessUnitID || "Unknown",
-          ResultDE: body.resultKey || "",
-          QueryText: parsedDescription.QueryText || truncateForDescription(body.queryText || "", 700),
-          RowCount: resultValues.length
-        }
-      ));
-      var completionAuditResult = safeWriteQueryAuditEvent({
-        runId: body.runToken || "",
-        status: "Complete",
-        sqlText: body.queryText || "",
-        resultKey: body.resultKey || "",
-        queryKey: body.queryKey || "",
-        taskId: body.taskId || "",
-        rowCount: resultValues.length,
-        references: extractSqlObjectReferences(body.queryText || ""),
-        securityMode: body.securityMode || ""
-      });
+      var completionAuditResult = {
+        Status: "Skipped",
+        StatusMessage: "Result audit and description update skipped on fetch to avoid CloudPage timeout."
+      };
 
       if (resultFormat === "rows") {
         Write(apiOk({
@@ -2871,6 +2850,8 @@ if (isApiRequest) {
           resultKey: body.resultKey || "",
           format: "rows",
           rowCount: rowObjects.length,
+          maxRows: maxRows,
+          isPreview: rowObjects.length >= maxRows,
           auditLogResult: completionAuditResult,
           columns: body.columns || [],
           rows: rowObjects
@@ -2881,23 +2862,14 @@ if (isApiRequest) {
           resultKey: body.resultKey || "",
           format: "table",
           rowCount: resultValues.length,
+          maxRows: maxRows,
+          isPreview: resultValues.length >= maxRows,
           auditLogResult: completionAuditResult,
           columns: body.columns || [],
           values: resultValues
         }));
       }
     } catch (resultsErr) {
-      safeWriteQueryAuditEvent({
-        runId: body.runToken || "",
-        status: "ResultFetchFailed",
-        sqlText: body.queryText || "",
-        resultKey: body.resultKey || "",
-        queryKey: body.queryKey || "",
-        taskId: body.taskId || "",
-        errorMessage: String(resultsErr),
-        references: extractSqlObjectReferences(body.queryText || ""),
-        securityMode: body.securityMode || ""
-      });
       Write(apiFail("getQueryDefinitionResults failed.", {
         step: "get_query_definition_results",
         resultKey: body.resultKey || "",
@@ -4666,6 +4638,7 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     queryKey: submitted.queryKey,
     taskId: submitted.taskId,
     securityMode: submitted.security?.mode || '',
+    maxRows: 2500,
     format: resultFormat
   });
   setRemoteRunPhase('fetching', `Loading results from ${submitted.resultKey}…`);
@@ -4734,12 +4707,13 @@ async function runSQL() {
       const ms = (performance.now() - t0).toFixed(1);
       const retentionWarning = getRetentionFallbackWarning(remote);
       const { columns, values } = remote;
+      const previewNote = remote.isPreview ? `first ${remote.maxRows || values.length} rows preview` : `${values.length} row${values.length !== 1 ? 's' : ''}`;
       const thead = '<tr>' + columns.map(c => `<th>${esc(c)}</th>`).join('') + '</tr>';
       const tbody = values.map(row =>
         '<tr>' + row.map(cell => `<td>${cell === null ? '<em style="color:#3a5a7a">NULL</em>' : esc(String(cell))}</td>`).join('') + '</tr>'
       ).join('');
       setResults(
-        `${values.length} row${values.length !== 1 ? 's' : ''} Â· ${columns.length} cols Â· ${ms}ms Â· DE ${esc(remote.dataExtension)}`,
+        `${previewNote} Â· ${columns.length} cols Â· ${ms}ms Â· DE ${esc(remote.dataExtension)}`,
         `<table class="results-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`,
         { columns, values }
       );
