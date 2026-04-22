@@ -480,12 +480,21 @@ function handleOAuthPageRequest() {
   }
 }
 
+function getRuntimeBusinessUnitId() {
+  var buId = "";
+  try { buId = Platform.Function.AccountID(); } catch (e1) {}
+  if (!buId || normalizeSecurityValue(buId) === "unknown") {
+    try { buId = Platform.Function.AuthenticatedMemberID(); } catch (e2) {}
+  }
+  return buId || "";
+}
+
 function getCurrentSecurityContext() {
   var oauthSession = getOAuthSession();
   if (oauthSession) {
     var sessionBuId = oauthSession.BusinessUnitID || "";
     if (!sessionBuId || normalizeSecurityValue(sessionBuId) === "unknown") {
-      try { sessionBuId = Platform.Function.AccountID(); } catch (sessionBuErr) {}
+      sessionBuId = getRuntimeBusinessUnitId();
     }
     return {
       runnerId: oauthSession.UserKey || "OAuthAuthenticated",
@@ -496,8 +505,7 @@ function getCurrentSecurityContext() {
     };
   }
   if (isOAuthLoginEnabled()) {
-    var oauthBuId = null;
-    try { oauthBuId = Platform.Function.AccountID(); } catch (oauthBuErr) {}
+    var oauthBuId = getRuntimeBusinessUnitId();
     return {
       runnerId: "Unknown",
       businessUnitId: oauthBuId || "Unknown",
@@ -507,9 +515,8 @@ function getCurrentSecurityContext() {
     };
   }
   var runnerId = null;
-  var buId = null;
+  var buId = getRuntimeBusinessUnitId();
   try { runnerId = Platform.Function.AuthenticatedMemberID(); } catch (e1) {}
-  try { buId = Platform.Function.AccountID(); } catch (e2) {}
   return {
     runnerId: runnerId || "Unknown",
     businessUnitId: buId || "Unknown",
@@ -833,14 +840,11 @@ function getPolicyUserDetails(policies, context) {
     var userName = cleanPolicyIdentityValue(policy.UserName, context);
     var emailAddress = cleanPolicyIdentityValue(policy.EmailAddress, context);
     var userDisplayName = cleanPolicyIdentityValue(policy.UserDisplayName, context);
-    var businessUnitId = ssjsTrim(String(policy.AllowedMID || ""));
-    if (businessUnitId === "*") businessUnitId = "";
-    if (userName || emailAddress || userDisplayName || businessUnitId) {
+    if (userName || emailAddress || userDisplayName) {
       return {
         userName: userName,
         emailAddress: emailAddress,
-        userDisplayName: userDisplayName,
-        businessUnitId: businessUnitId
+        userDisplayName: userDisplayName
       };
     }
   }
@@ -921,8 +925,8 @@ function enrichSecurityContextWithPolicy(context) {
   context.userName = context.userName || details.userName || "";
   context.emailAddress = context.emailAddress || details.emailAddress || "";
   context.userDisplayName = context.userDisplayName || details.userDisplayName || "";
-  if ((!context.businessUnitId || normalizeSecurityValue(context.businessUnitId) === "unknown") && details.businessUnitId) {
-    context.businessUnitId = details.businessUnitId;
+  if (!context.businessUnitId || normalizeSecurityValue(context.businessUnitId) === "unknown") {
+    context.businessUnitId = getRuntimeBusinessUnitId() || "Unknown";
   }
   return context;
 }
