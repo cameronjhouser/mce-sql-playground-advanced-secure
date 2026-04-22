@@ -898,6 +898,16 @@ function policiesRequireFolderMetadata(policies) {
   return false;
 }
 
+function refsAreDataViewOnly(refs) {
+  if (!refs || !refs.length) return false;
+  for (var i = 0; i < refs.length; i++) {
+    var ref = refs[i];
+    if (ref.isTemp) continue;
+    if (!ref.isDataView || ref.isEnt) return false;
+  }
+  return true;
+}
+
 function getDataFolderById(folderId) {
   try {
     var prox = new Script.Util.WSProxy();
@@ -917,6 +927,16 @@ function enforceQuerySecurity(sqlText, authGate) {
 
   var context = authGate && authGate.context ? authGate.context : getCurrentSecurityContext();
   var refs = extractSqlObjectReferences(sqlText);
+
+  if (isOAuthLoginEnabled() && getOAuthSession() && refsAreDataViewOnly(refs)) {
+    return {
+      ok: true,
+      context: context,
+      references: refs,
+      policyMode: "oauth_data_view_fast_path"
+    };
+  }
+
   var policies = authGate && authGate.policies ? authGate.policies : getMatchingSecurityPolicies(context);
   if (!policies || !policies.length) {
     return {
