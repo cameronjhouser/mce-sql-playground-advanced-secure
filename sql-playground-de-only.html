@@ -930,18 +930,24 @@ function enforceQuerySecurity(sqlText, authGate) {
   var readOnly = validateReadOnlySql(sqlText);
   if (!readOnly.ok) return readOnly;
 
-  var context = authGate && authGate.context ? authGate.context : getCurrentSecurityContext();
   var refs = extractSqlObjectReferences(sqlText);
 
-  if (isOAuthLoginEnabled() && hasOAuthSessionCookie() && refsAreDataViewOnly(refs)) {
+  if (hasOAuthSessionCookie() && refsAreDataViewOnly(refs)) {
     return {
       ok: true,
-      context: context,
+      context: {
+        runnerId: "OAuthCookie",
+        businessUnitId: "Unknown",
+        userName: "",
+        emailAddress: "",
+        userDisplayName: ""
+      },
       references: refs,
       policyMode: "oauth_data_view_fast_path"
     };
   }
 
+  var context = authGate && authGate.context ? authGate.context : getCurrentSecurityContext();
   var policies = authGate && authGate.policies ? authGate.policies : getMatchingSecurityPolicies(context);
   if (!policies || !policies.length) {
     return {
