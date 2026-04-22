@@ -2898,19 +2898,7 @@ if (isApiRequest) {
                 performResult = performQueryDefinition(qd.ObjectID);
                 taskId = extractTaskId(performResult);
               }
-              var auditSubmitResult = safeWriteQueryAuditEvent({
-                runId: runToken,
-                status: body.prepareOnly ? "QueryDefinitionPrepared" : "QueryDefinitionSubmitted",
-                sqlText: sqlText,
-                resultKey: resultKey,
-                queryKey: queryKey,
-                taskId: taskId || "",
-                rowCount: 0,
-                context: securityCheck.context,
-                references: extractSqlObjectReferences(sqlText),
-                securityMode: securityCheck.policyMode,
-                errorMessage: taskId || body.prepareOnly ? "" : "QueryDefinition started but no TaskID was returned."
-              });
+              var auditSubmitResult = { Status: "Deferred", StatusMessage: "Submit audit is written by a follow-up client request to keep QueryDefinition submit under the CloudPage timeout." };
               Write(apiOk({
                 runToken: runToken,
                 queryKey: queryKey,
@@ -4890,6 +4878,31 @@ async function runRemoteQueryDefinition(sql, options = {}) {
   let taskId = submitted.taskId;
   if (!taskId) {
     throw new Error('QueryDefinition was submitted but no TaskID was returned.');
+  }
+  try {
+    const submitAuditResp = await postApi({
+      action: 'auditClientEvent',
+      status: 'QueryDefinitionSubmitted',
+      runId: submitted.runToken,
+      resultKey: submitted.resultKey,
+      queryKey: submitted.queryKey,
+      taskId: taskId,
+      queryText: sql,
+      rowCount: 0,
+      references: [{
+        raw: submitted.queryKey || 'QueryDefinition',
+        name: submitted.queryKey || 'QueryDefinition',
+        type: 'QUERY_DEFINITION'
+      }],
+      securityMode: submitted.security?.mode || 'query_definition'
+    });
+    logRemoteStep('audit:query_submitted', {
+      status: submitAuditResp.res.status,
+      ok: submitAuditResp.res.ok,
+      bodyPreview: submitAuditResp.raw.slice(0, 180)
+    });
+  } catch (submitAuditErr) {
+    logRemoteStep('audit:query_submitted_error', String(submitAuditErr));
   }
   setRemoteRunPhase('queued', `Waiting for SFMC query queue... Task ${taskId}`);
 
