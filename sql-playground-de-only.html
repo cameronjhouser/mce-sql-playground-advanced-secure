@@ -2670,7 +2670,7 @@ if (isApiRequest) {
             object: preparedQdSecurityCheck.object || null
           }));
         } else {
-        var preparedQdCreate = createFastTempQueryDefinition(preparedQdKey, preparedQdName, preparedQdSql, preparedQdResultKey, preparedQdResultName);
+        var preparedQdCreate = createTempQueryDefinition(preparedQdKey, preparedQdName, preparedQdSql, preparedQdResultKey, preparedQdResultName);
         if (preparedQdCreate && preparedQdCreate.Status && String(preparedQdCreate.Status).toLowerCase() === "error") {
           Write(apiFail("Temporary QueryDefinition creation failed.", {
             step: "create_prepared_query_definition",
