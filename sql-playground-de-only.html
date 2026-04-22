@@ -641,6 +641,8 @@ function getSecurityPolicyRows() {
     "AllowedDEPattern",
     "CanUseENT",
     "CanUseDataViews",
+    "CanCreateTempDE",
+    "CanDownloadData",
     "IsAdmin",
     "Active"
   ];
@@ -709,6 +711,8 @@ function getAccessPolicyFieldDefinitions() {
     { Name: "AllowedDEPattern", FieldType: "Text", MaxLength: 254, IsRequired: false },
     { Name: "CanUseENT", FieldType: "Boolean", IsRequired: false },
     { Name: "CanUseDataViews", FieldType: "Boolean", IsRequired: false },
+    { Name: "CanCreateTempDE", FieldType: "Boolean", IsRequired: false },
+    { Name: "CanDownloadData", FieldType: "Boolean", IsRequired: false },
     { Name: "IsAdmin", FieldType: "Boolean", IsRequired: false },
     { Name: "Active", FieldType: "Boolean", IsRequired: false }
   ];
@@ -832,6 +836,53 @@ function getPolicyUserDetails(policies, context) {
     }
   }
   return {};
+}
+
+function getPolicyPermissions(policies) {
+  var permissions = {
+    canCreateTempDE: false,
+    canDownloadData: false
+  };
+  if (!policies || !policies.length) return permissions;
+  for (var i = 0; i < policies.length; i++) {
+    var policy = policies[i];
+    if (!isTruthySecurityValue(policy.Active)) continue;
+    if (isTruthySecurityValue(policy.IsAdmin)) {
+      permissions.canCreateTempDE = true;
+      permissions.canDownloadData = true;
+      return permissions;
+    }
+    if (isTruthySecurityValue(policy.CanCreateTempDE)) permissions.canCreateTempDE = true;
+    if (isTruthySecurityValue(policy.CanDownloadData)) permissions.canDownloadData = true;
+  }
+  return permissions;
+}
+
+function requirePolicyPermission(permissionName) {
+  if (!getOAuthSession()) {
+    return {
+      ok: false,
+      message: "Marketing Cloud login is required for this action."
+    };
+  }
+  try { ensureAccessPolicyDataExtension(); } catch (ensurePolicyErr) {}
+  var context = getCurrentSecurityContext();
+  var policies = getMatchingSecurityPolicies(context);
+  var permissions = getPolicyPermissions(policies);
+  if (permissions[permissionName]) {
+    return {
+      ok: true,
+      context: context,
+      policies: policies,
+      permissions: permissions
+    };
+  }
+  return {
+    ok: false,
+    context: context,
+    permissions: permissions,
+    message: "Your playground access policy does not allow this action."
+  };
 }
 
 function getSecurityPolicySummary(context, policies) {
@@ -2056,11 +2107,13 @@ if (isApiRequest) {
       }));
     }
   } else if (body.action === "authStatus") {
+    try { ensureAccessPolicyDataExtension(); } catch (authPolicyEnsureErr) {}
     var authContext = getCurrentSecurityContext();
     var authPolicies = getMatchingSecurityPolicies(authContext);
-    var isLoggedIn = !!(authPolicies && authPolicies.length);
     var oauthSession = getOAuthSession();
-    if (isLoggedIn) {
+    var isLoggedIn = !!oauthSession;
+    var authPermissions = getPolicyPermissions(authPolicies);
+    if (authPolicies && authPolicies.length) {
       var authDetails = getPolicyUserDetails(authPolicies, authContext);
       authContext.userName = authContext.userName || authDetails.userName || "";
       authContext.emailAddress = authContext.emailAddress || authDetails.emailAddress || "";
@@ -2078,10 +2131,14 @@ if (isApiRequest) {
       userName: authContext.userName || "",
       emailAddress: authContext.emailAddress || "",
       userDisplayName: authContext.userDisplayName || "",
+      permissions: authPermissions,
+      canRunRemoteQueries: isLoggedIn,
+      canCreateTempDE: authPermissions.canCreateTempDE,
+      canDownloadData: authPermissions.canDownloadData,
       policyMatchCount: authPolicies ? authPolicies.length : 0,
       policySummary: getSecurityPolicySummary(authContext, authPolicies),
       hasDisplayIdentity: !!(authContext.userDisplayName || authContext.userName || authContext.emailAddress),
-      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "Authenticated MC user") : (oauthSession ? "Logged in - Access policy required" : "Not authorized - Limited Access")
+      label: isLoggedIn ? (authContext.userDisplayName || authContext.userName || authContext.emailAddress || "Authenticated MC user") : "Not authorized - Limited Access"
     }));
   } else if (body.action === "debugLookupDe") {
     try {
@@ -2186,10 +2243,16 @@ if (isApiRequest) {
     }
   } else if (body.action === "createTempSourceDataExtension") {
     try {
+      var tempCreateGate = requirePolicyPermission("canCreateTempDE");
       var localName = ssjsTrim(String(body.localName || ""));
       var columns = body.columns || [];
       var fieldSettings = body.fieldSettings || {};
-      if (!localName) {
+      if (!tempCreateGate.ok) {
+        Write(apiFail(tempCreateGate.message || "Temp Data Extension creation is not allowed for this user.", {
+          step: "temp_de_permission_required",
+          permission: "CanCreateTempDE"
+        }));
+      } else if (!localName) {
         Write(apiFail("Local CSV name is required.", {
           step: "validate_csv_stage"
         }));
@@ -2273,10 +2336,16 @@ if (isApiRequest) {
     }
   } else if (body.action === "appendTempSourceRows") {
     try {
+      var tempAppendGate = requirePolicyPermission("canCreateTempDE");
       var appendSourceKey = ssjsTrim(String(body.sourceKey || ""));
       var appendRows = body.rows || [];
       var appendFieldSettings = body.fieldSettings || {};
-      if (!appendSourceKey) {
+      if (!tempAppendGate.ok) {
+        Write(apiFail(tempAppendGate.message || "Temp Data Extension row upload is not allowed for this user.", {
+          step: "temp_de_permission_required",
+          permission: "CanCreateTempDE"
+        }));
+      } else if (!appendSourceKey) {
         Write(apiFail("Temp source CustomerKey is required.", {
           step: "append_temp_source_rows"
         }));
@@ -3689,17 +3758,29 @@ function renderResults(tab) {
   const r = tab && tab.results;
   document.getElementById('resultsMeta').textContent = r ? r.meta : 'Run a query to see results.';
   document.getElementById('resultsWrap').innerHTML = r ? r.html : '<div class="empty-state">No results yet.</div>';
-  document.getElementById('btnDownloadCsv').style.display = (r && r.csvData) ? 'inline-block' : 'none';
-  document.getElementById('btnDownloadJson').style.display = (r && r.csvData) ? 'inline-block' : 'none';
+  updateDownloadButtons(r && r.csvData);
 }
 
 function setResults(meta, html, csvData) {
   document.getElementById('resultsMeta').textContent = meta;
   document.getElementById('resultsWrap').innerHTML = html;
-  document.getElementById('btnDownloadCsv').style.display = csvData ? 'inline-block' : 'none';
-  document.getElementById('btnDownloadJson').style.display = csvData ? 'inline-block' : 'none';
+  updateDownloadButtons(csvData);
   const cur = tabs.find(t => t.id === activeTabId);
   if (cur) cur.results = { meta, html, csvData: csvData || null };
+}
+
+function updateDownloadButtons(csvData) {
+  const visible = !!(csvData && authState.canDownloadData);
+  const csvBtn = document.getElementById('btnDownloadCsv');
+  const jsonBtn = document.getElementById('btnDownloadJson');
+  if (csvBtn) {
+    csvBtn.style.display = visible ? 'inline-block' : 'none';
+    csvBtn.title = csvData && !authState.canDownloadData ? 'Download permission required.' : '';
+  }
+  if (jsonBtn) {
+    jsonBtn.style.display = visible ? 'inline-block' : 'none';
+    jsonBtn.title = csvData && !authState.canDownloadData ? 'Download permission required.' : '';
+  }
 }
 
 function buildRetentionWarningText(remote) {
@@ -3815,6 +3896,10 @@ function downloadCSV() {
   const cur = tabs.find(t => t.id === activeTabId);
   const csvData = cur && cur.results && cur.results.csvData;
   if (!csvData) return;
+  if (!authState.canDownloadData) {
+    showError('CanDownloadData permission is required to download result data.');
+    return;
+  }
   auditDownloadEvent('csv', csvData);
   const { columns, values } = csvData;
   const escape = v => {
@@ -3836,6 +3921,10 @@ function downloadJSON() {
   const cur = tabs.find(t => t.id === activeTabId);
   const csvData = cur && cur.results && cur.results.csvData;
   if (!csvData) return;
+  if (!authState.canDownloadData) {
+    showError('CanDownloadData permission is required to download result data.');
+    return;
+  }
   auditDownloadEvent('json', csvData);
   const columns = csvData.columns || [];
   const values = csvData.values || [];
@@ -3899,6 +3988,12 @@ function switchDataTab(t) {
 // ════════════════════════════════════════════════════════════
 let sqlDb = null;
 let loadedDEs = {};
+let authState = {
+  authenticated: false,
+  canRunRemoteQueries: false,
+  canCreateTempDE: false,
+  canDownloadData: false
+};
 
 function quoteSqlIdentifier(name) {
   return `[${String(name || '').replace(/\]/g, ']]')}]`;
@@ -4103,6 +4198,8 @@ function updateDEUI(tableName, cols, rowCount) {
     tempBtn.disabled = true;
   } else if (de.tempDeStatus === 'stale') {
     tempBtn.textContent = 'Recreate Temp DE';
+    tempBtn.disabled = !authState.canCreateTempDE;
+    tempBtn.title = authState.canCreateTempDE ? '' : 'CanCreateTempDE permission required.';
     tempBtn.onclick = () => createTempDEFromCsv(tableName);
   } else if (de.tempDeStatus === 'ready' && de.tempDe && de.tempDe.name) {
     tempBtn.classList.add('ready');
@@ -4110,6 +4207,8 @@ function updateDEUI(tableName, cols, rowCount) {
     tempBtn.onclick = () => queryTempDE(tableName);
   } else {
     tempBtn.textContent = 'Create Temp DE';
+    tempBtn.disabled = !authState.canCreateTempDE;
+    tempBtn.title = authState.canCreateTempDE ? '' : 'CanCreateTempDE permission required.';
     tempBtn.onclick = () => createTempDEFromCsv(tableName);
   }
   const del = document.createElement('button');
@@ -4127,6 +4226,10 @@ async function createTempDEFromCsv(tableName) {
   if (de.tempDeStatus === 'creating') return;
   if (de.tempDeStatus === 'ready' && de.tempDe && de.tempDe.name) {
     queryTempDE(tableName);
+    return;
+  }
+  if (!authState.canCreateTempDE) {
+    showError('CanCreateTempDE permission is required to create or upload rows into a temporary Data Extension.');
     return;
   }
 
@@ -4498,6 +4601,14 @@ async function loadAuthStatus() {
   try {
     const response = await postApi({ action: 'authStatus' });
     const data = response.json && response.json.ok ? response.json.data : null;
+    authState = {
+      authenticated: !!(data && data.authenticated),
+      canRunRemoteQueries: !!(data && data.canRunRemoteQueries),
+      canCreateTempDE: !!(data && data.canCreateTempDE),
+      canDownloadData: !!(data && data.canDownloadData)
+    };
+    updateDownloadButtons((tabs.find(t => t.id === activeTabId)?.results || {}).csvData);
+    Object.keys(loadedDEs).forEach(name => updateDEUI(name, loadedDEs[name].columns, loadedDEs[name].rowCount));
     logRemoteStep('auth_status', data || {
       status: response.res.status,
       ok: response.res.ok,
@@ -4525,42 +4636,37 @@ async function loadAuthStatus() {
       const displayLabel = displayName || userName || emailAddress || 'User details missing';
       badge.textContent = `Logged in: ${displayLabel}`;
       badge.title = [
-        !hasDisplayIdentity ? 'Access policy matched, but UserDisplayName, UserName, and EmailAddress are blank.' : '',
+        !hasDisplayIdentity ? 'UserDisplayName, UserName, and EmailAddress are blank.' : '',
         displayName ? `Display name: ${displayName}` : '',
         userName ? `Username: ${userName}` : '',
         emailAddress ? `Email: ${emailAddress}` : '',
-        data.businessUnitId ? `BU: ${data.businessUnitId}` : ''
+        data.businessUnitId ? `BU: ${data.businessUnitId}` : '',
+        `Remote queries: ${authState.canRunRemoteQueries ? 'allowed' : 'blocked'}`,
+        `Create temp DE: ${authState.canCreateTempDE ? 'allowed' : 'blocked'}`,
+        `Download data: ${authState.canDownloadData ? 'allowed' : 'blocked'}`
       ].filter(Boolean).join('\n');
-      badge.classList.toggle('limited', !hasDisplayIdentity);
-    } else if (data && data.oauthAuthenticated) {
-      badge.textContent = 'Logged in - Access policy required';
-      const summary = data.policySummary || {};
-      badge.title = [
-        'Marketing Cloud login is valid, but no active access policy row matched this user/BU.',
-        `Policy rows: ${summary.rowCount ?? 'unknown'}`,
-        `Active policy rows: ${summary.activeRowCount ?? 'unknown'}`,
-        `Matched policy rows: ${summary.matchCount ?? 0}`,
-        summary.contextRunnerId ? `UserKey compared: ${summary.contextRunnerId}` : '',
-        summary.contextUserName ? `UserName compared: ${summary.contextUserName}` : '',
-        summary.contextEmailAddress ? `Email compared: ${summary.contextEmailAddress}` : '',
-        summary.contextUserDisplayName ? `Display name compared: ${summary.contextUserDisplayName}` : '',
-        summary.contextBusinessUnitId ? `BU compared: ${summary.contextBusinessUnitId}` : ''
-      ].filter(Boolean).join('\n');
-      badge.classList.add('limited');
+      badge.classList.toggle('limited', false);
     } else {
       badge.textContent = 'Not authorized - Limited Access';
       badge.title = data && data.oauthConfigProblem
         ? data.oauthConfigProblem
         : data && data.oauthEnabled
-        ? 'Use Log in to authenticate with Marketing Cloud. CSV upload and local SQLite queries are available without login.'
-        : 'CSV upload and local SQLite queries are available. Marketing Cloud Query Activities require an active access policy row.';
+        ? 'Use Log in to authenticate with Marketing Cloud. Local CSV and SQLite queries are available without login.'
+        : 'Local CSV and SQLite queries are available. Marketing Cloud Query Activities require login.';
       badge.classList.add('limited');
     }
   } catch (err) {
+    authState = {
+      authenticated: false,
+      canRunRemoteQueries: false,
+      canCreateTempDE: false,
+      canDownloadData: false
+    };
+    updateDownloadButtons((tabs.find(t => t.id === activeTabId)?.results || {}).csvData);
     if (loginLink) loginLink.style.display = 'none';
     if (logoutLink) logoutLink.style.display = 'none';
     badge.textContent = 'Not authorized - Limited Access';
-    badge.title = 'Could not verify access policy. Marketing Cloud Query Activities require an active access policy row.';
+    badge.title = 'Could not verify login. Marketing Cloud Query Activities require login.';
     badge.classList.add('limited');
   }
 }
@@ -4753,6 +4859,12 @@ async function runSQL() {
   btn.disabled = true; btn.textContent = '⏳ Running…';
   try {
     if (shouldRunRemoteQuery(sql)) {
+      if (!authState.canRunRemoteQueries) {
+        await loadAuthStatus();
+      }
+      if (!authState.canRunRemoteQueries) {
+        throw new Error('Marketing Cloud login is required to query Data Extensions or Data Views.');
+      }
       const t0 = performance.now();
       const remote = await runRemoteQueryDefinition(sql);
       const ms = (performance.now() - t0).toFixed(1);
