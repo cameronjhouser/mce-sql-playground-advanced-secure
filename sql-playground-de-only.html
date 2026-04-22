@@ -553,7 +553,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "authorizePreparedQueryDefinition" || action === "createAuthorizedPreparedQueryDefinition" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
   return true;
 }
 
@@ -2435,6 +2435,93 @@ if (isApiRequest) {
         step: "create_prepared_query_definition",
         queryKey: body.queryKey || "",
         message: String(preparedQdErr)
+      }));
+    }
+  } else if (body.action === "authorizePreparedQueryDefinition") {
+    try {
+      var authorizeQdKey = ssjsTrim(String(body.queryKey || ""));
+      var authorizeQdSql = ssjsTrim(String(body.sql || ""));
+      var authorizeResultKey = ssjsTrim(String(body.resultKey || ""));
+      if (!authorizeQdKey || !authorizeQdSql || !authorizeResultKey) {
+        Write(apiFail("QueryDefinition key, SQL, and result target are required.", {
+          step: "authorize_prepared_query_definition",
+          queryKey: authorizeQdKey,
+          resultKey: authorizeResultKey
+        }));
+      } else if (!isTempQueryKey(authorizeQdKey) || !isTempResultKey(authorizeResultKey)) {
+        Write(apiFail("Only playground temporary QueryDefinitions and result Data Extensions can be authorized from this endpoint.", {
+          step: "authorize_prepared_query_definition",
+          queryKey: authorizeQdKey,
+          resultKey: authorizeResultKey
+        }));
+      } else {
+        var authorizeSecurityCheck = enforceQuerySecurity(authorizeQdSql, apiAuthGate);
+        if (!authorizeSecurityCheck.ok) {
+          Write(apiFail(authorizeSecurityCheck.message || "Query blocked by playground security policy.", {
+            step: "security_policy",
+            context: authorizeSecurityCheck.context || null,
+            object: authorizeSecurityCheck.object || null
+          }));
+        } else {
+          Write(apiOk({
+            queryKey: authorizeQdKey,
+            resultKey: authorizeResultKey,
+            security: {
+              mode: authorizeSecurityCheck.policyMode,
+              context: authorizeSecurityCheck.context,
+              references: authorizeSecurityCheck.references
+            }
+          }));
+        }
+      }
+    } catch (authorizeQdErr) {
+      Write(apiFail("authorizePreparedQueryDefinition failed.", {
+        step: "authorize_prepared_query_definition",
+        queryKey: body.queryKey || "",
+        message: String(authorizeQdErr)
+      }));
+    }
+  } else if (body.action === "createAuthorizedPreparedQueryDefinition") {
+    try {
+      var authorizedQdKey = ssjsTrim(String(body.queryKey || ""));
+      var authorizedQdName = ssjsTrim(String(body.queryName || authorizedQdKey));
+      var authorizedQdSql = ssjsTrim(String(body.sql || ""));
+      var authorizedResultKey = ssjsTrim(String(body.resultKey || ""));
+      var authorizedResultName = ssjsTrim(String(body.resultName || authorizedResultKey));
+      if (!authorizedQdKey || !authorizedQdSql || !authorizedResultKey) {
+        Write(apiFail("QueryDefinition key, SQL, and result target are required.", {
+          step: "create_authorized_prepared_query_definition",
+          queryKey: authorizedQdKey,
+          resultKey: authorizedResultKey
+        }));
+      } else if (!isTempQueryKey(authorizedQdKey) || !isTempResultKey(authorizedResultKey)) {
+        Write(apiFail("Only playground temporary QueryDefinitions and result Data Extensions can be created from this endpoint.", {
+          step: "create_authorized_prepared_query_definition",
+          queryKey: authorizedQdKey,
+          resultKey: authorizedResultKey
+        }));
+      } else {
+        var authorizedQdCreate = createFastTempQueryDefinition(authorizedQdKey, authorizedQdName, authorizedQdSql, authorizedResultKey, authorizedResultName);
+        if (authorizedQdCreate && authorizedQdCreate.Status && String(authorizedQdCreate.Status).toLowerCase() === "error") {
+          Write(apiFail("Temporary QueryDefinition creation failed.", {
+            step: "create_authorized_prepared_query_definition",
+            queryKey: authorizedQdKey,
+            qdCreate: authorizedQdCreate
+          }));
+        } else {
+          Write(apiOk({
+            queryKey: authorizedQdKey,
+            queryName: authorizedQdName,
+            resultKey: authorizedResultKey,
+            qdCreate: authorizedQdCreate
+          }));
+        }
+      }
+    } catch (authorizedQdErr) {
+      Write(apiFail("createAuthorizedPreparedQueryDefinition failed.", {
+        step: "create_authorized_prepared_query_definition",
+        queryKey: body.queryKey || "",
+        message: String(authorizedQdErr)
       }));
     }
   } else if (body.action === "submitQueryDefinitionRun") {
@@ -4526,8 +4613,31 @@ async function runRemoteQueryDefinition(sql, options = {}) {
   }
 
   setRemoteRunPhase('queued', `Creating Query Activity ${submitted.queryKey}…`);
+  const authorizeResp = await postApi({
+    action: 'authorizePreparedQueryDefinition',
+    queryKey: submitted.queryKey,
+    sql,
+    resultKey: submitted.resultKey
+  });
+  logRemoteStep('query_definition:authorize_query_definition', {
+    status: authorizeResp.res.status,
+    ok: authorizeResp.res.ok,
+    bodyPreview: authorizeResp.raw.slice(0, 220)
+  });
+  if (!authorizeResp.json) {
+    throw new Error(`authorizePreparedQueryDefinition returned HTTP ${authorizeResp.res.status} ${authorizeResp.res.statusText}. Response starts with: ${authorizeResp.raw.slice(0, 160)}`);
+  }
+  if (!authorizeResp.json.ok) {
+    const details = authorizeResp.json.error?.details || {};
+    const parts = [authorizeResp.json.error?.message || 'authorizePreparedQueryDefinition failed.'];
+    if (details.step) parts.push(`Step: ${details.step}`);
+    if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
+    throw new Error(parts.join(' | '));
+  }
+  submitted.security = authorizeResp.json.data.security || submitted.security;
+
   const queryDefResp = await postApi({
-    action: 'createPreparedQueryDefinition',
+    action: 'createAuthorizedPreparedQueryDefinition',
     queryKey: submitted.queryKey,
     queryName: submitted.queryName,
     sql,
@@ -4540,11 +4650,11 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     bodyPreview: queryDefResp.raw.slice(0, 220)
   });
   if (!queryDefResp.json) {
-    throw new Error(`createPreparedQueryDefinition returned HTTP ${queryDefResp.res.status} ${queryDefResp.res.statusText}. Response starts with: ${queryDefResp.raw.slice(0, 160)}`);
+    throw new Error(`createAuthorizedPreparedQueryDefinition returned HTTP ${queryDefResp.res.status} ${queryDefResp.res.statusText}. Response starts with: ${queryDefResp.raw.slice(0, 160)}`);
   }
   if (!queryDefResp.json.ok) {
     const details = queryDefResp.json.error?.details || {};
-    const parts = [queryDefResp.json.error?.message || 'createPreparedQueryDefinition failed.'];
+    const parts = [queryDefResp.json.error?.message || 'createAuthorizedPreparedQueryDefinition failed.'];
     if (details.step) parts.push(`Step: ${details.step}`);
     if (details.queryKey) parts.push(`Query Activity: ${details.queryKey}`);
     if (details.errorMessage) parts.push(`Create error: ${details.errorMessage}`);
