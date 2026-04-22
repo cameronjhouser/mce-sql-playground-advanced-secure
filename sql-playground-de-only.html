@@ -553,7 +553,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "authorizePreparedQueryDefinition" || action === "createAuthorizedPreparedQueryDefinition" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "submitQueryDefinitionRun" || action === "getQueryDefinitionStatus" || action === "getQueryDefinitionResults" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "authorizePreparedQueryDefinition" || action === "createAuthorizedPreparedQueryDefinition" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
   return true;
 }
 
@@ -2540,8 +2540,18 @@ if (isApiRequest) {
       var sqlText = ssjsTrim(String(body.sql || ""));
       if (!sqlText) {
         Write(apiFail("SQL text is required.", { step: "validate_sql" }));
+      } else if (!hasOAuthSessionCookie()) {
+        Write(apiFail("Marketing Cloud login is required to run remote Query Activities.", {
+          step: "authentication_required"
+        }));
       } else {
-        var securityCheck = enforceQuerySecurity(sqlText, apiAuthGate);
+        var readOnlyCheck = validateReadOnlySql(sqlText);
+        var securityCheck = readOnlyCheck.ok ? {
+          ok: true,
+          context: null,
+          references: [],
+          policyMode: "oauth_session_fast_path"
+        } : readOnlyCheck;
         if (!securityCheck.ok) {
           safeWriteQueryAuditEvent({
             runId: Platform.Function.GUID(),
@@ -4568,158 +4578,40 @@ window.runRetentionDiagnostic = runRetentionDiagnostic;
 
 async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
-  const debugPayload = { action: 'prepareLightQueryRun', sql };
-  startRemoteRunUi('queued', 'Preparing query run…');
+  const debugPayload = { action: 'submitQueryDefinitionRun', sql };
+  startRemoteRunUi('queued', 'Submitting query to SFMC...');
   logRemoteStep('query_definition:sql', sql);
   logRemoteStep('query_definition:start', {
     endpoint: window.location.pathname + '?api=1',
     payload: debugPayload
   });
 
-  const prepare = await postApi(debugPayload);
-  logRemoteStep('query_definition:prepare', {
-    status: prepare.res.status,
-    ok: prepare.res.ok,
-    body: prepare.raw
+  const submit = await postApi(debugPayload);
+  logRemoteStep('query_definition:submit', {
+    status: submit.res.status,
+    ok: submit.res.ok,
+    body: submit.raw
   });
 
-  if (!prepare.json) {
-    throw new Error(`prepareLightQueryRun returned HTTP ${prepare.res.status} ${prepare.res.statusText}. Response starts with: ${prepare.raw.slice(0, 160)}`);
+  if (!submit.json) {
+    throw new Error(`submitQueryDefinitionRun returned HTTP ${submit.res.status} ${submit.res.statusText}. Response starts with: ${submit.raw.slice(0, 160)}`);
   }
-  if (!prepare.json.ok) {
-    const details = prepare.json.error?.details || {};
-    const parts = [prepare.json.error?.message || 'prepareLightQueryRun failed.'];
+  if (!submit.json.ok) {
+    const details = submit.json.error?.details || {};
+    const parts = [submit.json.error?.message || 'submitQueryDefinitionRun failed.'];
     if (details.step) parts.push(`Step: ${details.step}`);
-    if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
     if (details.retentionErrorMessage) parts.push(`Retention error: ${details.retentionErrorMessage}`);
     if (details.finalCreateErrorMessage) parts.push(`Final create error: ${details.finalCreateErrorMessage}`);
     if (details.resultFolderName) parts.push(`Folder: ${details.resultFolderName}`);
     throw new Error(parts.join(' | '));
   }
 
-  const submitted = prepare.json.data;
-  setRemoteRunPhase('queued', `Creating result Data Extension ${submitted.resultKey}…`);
-  const resultDeResp = await postApi({
-    action: 'createPreparedResultDataExtension',
-    resultKey: submitted.resultKey,
-    resultName: submitted.resultName,
-    columns: submitted.columns
-  });
-  logRemoteStep('query_definition:create_result_de', {
-    status: resultDeResp.res.status,
-    ok: resultDeResp.res.ok,
-    bodyPreview: resultDeResp.raw.slice(0, 220)
-  });
-  if (!resultDeResp.json) {
-    throw new Error(`createPreparedResultDataExtension returned HTTP ${resultDeResp.res.status} ${resultDeResp.res.statusText}. Response starts with: ${resultDeResp.raw.slice(0, 160)}`);
-  }
-  if (!resultDeResp.json.ok) {
-    const details = resultDeResp.json.error?.details || {};
-    const parts = [resultDeResp.json.error?.message || 'createPreparedResultDataExtension failed.'];
-    if (details.step) parts.push(`Step: ${details.step}`);
-    if (details.resultKey) parts.push(`Result DE: ${details.resultKey}`);
-    if (details.resultFolderName) parts.push(`Folder: ${details.resultFolderName}`);
-    if (details.errorMessage) parts.push(`Create error: ${details.errorMessage}`);
-    throw new Error(parts.join(' | '));
-  }
-
-  setRemoteRunPhase('queued', `Creating Query Activity ${submitted.queryKey}…`);
-  const authorizeResp = await postApi({
-    action: 'authorizePreparedQueryDefinition',
-    queryKey: submitted.queryKey,
-    sql,
-    resultKey: submitted.resultKey
-  });
-  logRemoteStep('query_definition:authorize_query_definition', {
-    status: authorizeResp.res.status,
-    ok: authorizeResp.res.ok,
-    bodyPreview: authorizeResp.raw.slice(0, 220)
-  });
-  if (!authorizeResp.json) {
-    throw new Error(`authorizePreparedQueryDefinition returned HTTP ${authorizeResp.res.status} ${authorizeResp.res.statusText}. Response starts with: ${authorizeResp.raw.slice(0, 160)}`);
-  }
-  if (!authorizeResp.json.ok) {
-    const details = authorizeResp.json.error?.details || {};
-    const parts = [authorizeResp.json.error?.message || 'authorizePreparedQueryDefinition failed.'];
-    if (details.step) parts.push(`Step: ${details.step}`);
-    if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
-    throw new Error(parts.join(' | '));
-  }
-  submitted.security = authorizeResp.json.data.security || submitted.security;
-
-  const queryDefResp = await postApi({
-    action: 'createAuthorizedPreparedQueryDefinition',
-    queryKey: submitted.queryKey,
-    queryName: submitted.queryName,
-    sql,
-    resultKey: submitted.resultKey,
-    resultName: submitted.resultName
-  });
-  logRemoteStep('query_definition:create_query_definition', {
-    status: queryDefResp.res.status,
-    ok: queryDefResp.res.ok,
-    bodyPreview: queryDefResp.raw.slice(0, 220)
-  });
-  if (!queryDefResp.json) {
-    throw new Error(`createAuthorizedPreparedQueryDefinition returned HTTP ${queryDefResp.res.status} ${queryDefResp.res.statusText}. Response starts with: ${queryDefResp.raw.slice(0, 160)}`);
-  }
-  if (!queryDefResp.json.ok) {
-    const details = queryDefResp.json.error?.details || {};
-    const parts = [queryDefResp.json.error?.message || 'createAuthorizedPreparedQueryDefinition failed.'];
-    if (details.step) parts.push(`Step: ${details.step}`);
-    if (details.queryKey) parts.push(`Query Activity: ${details.queryKey}`);
-    if (details.errorMessage) parts.push(`Create error: ${details.errorMessage}`);
-    throw new Error(parts.join(' | '));
-  }
-  submitted.queryObjectId = queryDefResp.json.data.queryObjectId || submitted.queryObjectId;
-
-  setRemoteRunPhase('queued', `Starting SFMC Query Activity ${submitted.queryKey}…`);
-  const startResp = await postApi({
-    action: 'startPreparedQueryDefinitionRun',
-    queryKey: submitted.queryKey
-  });
-  logRemoteStep('query_definition:start_prepared', {
-    status: startResp.res.status,
-    ok: startResp.res.ok,
-    bodyPreview: startResp.raw.slice(0, 220)
-  });
-  if (!startResp.json) {
-    throw new Error(`startPreparedQueryDefinitionRun returned HTTP ${startResp.res.status} ${startResp.res.statusText}. Response starts with: ${startResp.raw.slice(0, 160)}`);
-  }
-  if (!startResp.json.ok) {
-    throw new Error(startResp.json.error?.message || 'startPreparedQueryDefinitionRun failed.');
-  }
-  let taskId = startResp.json.data.taskId;
-  submitted.taskId = taskId;
-  submitted.performResult = startResp.json.data.performResult;
-
-  if (submitted.retentionDeferred) {
-    postApi({
-      action: 'finalizePreparedQueryMetadata',
-      resultKey: submitted.resultKey,
-      queryKey: submitted.queryKey,
-      resultDescription: submitted.resultDescription || '',
-      queryDescription: submitted.queryDescription || ''
-    }).then(finalizeResp => {
-      logRemoteStep('query_definition:finalize_metadata', {
-        status: finalizeResp.res.status,
-        ok: finalizeResp.res.ok,
-        bodyPreview: finalizeResp.raw.slice(0, 220)
-      });
-      if (finalizeResp.json && finalizeResp.json.ok) {
-        submitted.retentionDays = finalizeResp.json.data.retentionDays;
-        submitted.retentionPolicy = finalizeResp.json.data.retentionPolicy;
-        submitted.retentionFallbackUsed = finalizeResp.json.data.retentionFallbackUsed;
-        submitted.retentionErrorMessage = finalizeResp.json.data.retentionErrorMessage;
-      }
-    }).catch(finalizeErr => {
-      logRemoteStep('query_definition:finalize_metadata_error', String(finalizeErr));
-    });
-  }
+  const submitted = submit.json.data;
+  let taskId = submitted.taskId;
   if (!taskId) {
     throw new Error('QueryDefinition was submitted but no TaskID was returned.');
   }
-  setRemoteRunPhase('queued', `Waiting for SFMC query queue… Task ${taskId}`);
+  setRemoteRunPhase('queued', `Waiting for SFMC query queue... Task ${taskId}`);
 
   let latestStatus = null;
   for (let attempt = 0; attempt < 360; attempt++) {
