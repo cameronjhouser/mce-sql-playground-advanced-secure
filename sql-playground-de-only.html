@@ -1761,6 +1761,41 @@ function getQueryDefinitionByKey(queryKey) {
   return getQueryDefinition(queryKey);
 }
 
+function extractCreatedObjectId(createResult) {
+  try {
+    if (!createResult) return "";
+    if (createResult.ObjectID) return createResult.ObjectID;
+    if (createResult.NewObjectID) return createResult.NewObjectID;
+    if (createResult.Results && createResult.Results.length) {
+      for (var i = 0; i < createResult.Results.length; i++) {
+        var item = createResult.Results[i] || {};
+        if (item.ObjectID) return item.ObjectID;
+        if (item.NewObjectID) return item.NewObjectID;
+        if (item.Object && item.Object.ObjectID) return item.Object.ObjectID;
+        if (item.Object && item.Object.NewObjectID) return item.Object.NewObjectID;
+      }
+    }
+  } catch (e) {}
+  return "";
+}
+
+function sleepBeforeRetry(milliseconds) {
+  try {
+    Platform.Function.Sleep(milliseconds);
+  } catch (e) {}
+}
+
+function getQueryDefinitionByKeyWithRetry(queryKey, attempts, delayMs) {
+  var tries = Math.max(1, parseInt(attempts, 10) || 1);
+  var wait = Math.max(0, parseInt(delayMs, 10) || 0);
+  for (var i = 0; i < tries; i++) {
+    var qd = getQueryDefinitionByKey(queryKey);
+    if (qd && qd.ObjectID) return qd;
+    if (i < tries - 1 && wait) sleepBeforeRetry(wait);
+  }
+  return null;
+}
+
 // NOTE:
 // Generic QueryDefinition starter.
 // Accepts either ObjectID or CustomerKey so it can be reused more easily.
@@ -2740,13 +2775,23 @@ if (isApiRequest) {
               qdCreate: qdCreate
             }));
           } else {
-            var qd = getQueryDefinitionByKey(queryKey);
+            var qdCreateObjectId = extractCreatedObjectId(qdCreate);
+            var qd = getQueryDefinitionByKeyWithRetry(queryKey, 5, 500);
+            if ((!qd || !qd.ObjectID) && qdCreateObjectId) {
+              qd = {
+                ObjectID: qdCreateObjectId,
+                CustomerKey: queryKey,
+                Name: queryName
+              };
+            }
             if (!qd || !qd.ObjectID) {
               Write(apiFail("QueryDefinition was created but could not be retrieved for execution.", {
                 step: "retrieve_query_definition",
                 queryKey: queryKey,
                 deCreate: deCreate,
-                qdCreate: qdCreate
+                qdCreate: qdCreate,
+                createResultObjectId: qdCreateObjectId,
+                retrievedQueryDefinition: qd || null
               }));
             } else {
               var performResult = null;
