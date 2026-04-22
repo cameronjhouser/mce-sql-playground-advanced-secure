@@ -641,7 +641,6 @@ function wildcardToRegExp(pattern) {
 function getSecurityPolicyRows() {
   if (typeof getSecurityPolicyRows._cache !== "undefined") return getSecurityPolicyRows._cache;
   var policyColumns = [
-    "UserKey",
     "UserName",
     "EmailAddress",
     "UserDisplayName",
@@ -658,40 +657,21 @@ function getSecurityPolicyRows() {
   try {
     var rows = [];
     var seen = {};
-    var wildcardRows = Platform.Function.LookupRows(SECURITY_POLICY_DE_KEY, "UserKey", "*") || [];
-    for (var w = 0; w < wildcardRows.length; w++) {
-      if (isTruthySecurityValue(wildcardRows[w].Active)) {
-        var wildcardKey = [
-          wildcardRows[w].UserKey || "",
-          wildcardRows[w].UserName || "",
-          wildcardRows[w].EmailAddress || "",
-          wildcardRows[w].AllowedMID || "",
-          wildcardRows[w].AllowedFolderName || "",
-          wildcardRows[w].AllowedDEPattern || ""
-        ].join("|");
-        if (!seen[wildcardKey]) {
-          seen[wildcardKey] = true;
-          rows.push(wildcardRows[w]);
-        }
-      }
-    }
     var activeValues = ["true", "True", "TRUE", "1"];
-    if (!rows.length) {
-      for (var a = 0; a < activeValues.length; a++) {
-        var matched = Platform.Function.LookupRows(SECURITY_POLICY_DE_KEY, "Active", activeValues[a]) || [];
-        for (var i = 0; i < matched.length; i++) {
-          var key = [
-            matched[i].UserKey || "",
-            matched[i].UserName || "",
-            matched[i].EmailAddress || "",
-            matched[i].AllowedMID || "",
-            matched[i].AllowedFolderName || "",
-            matched[i].AllowedDEPattern || ""
-          ].join("|");
-          if (!seen[key]) {
-            seen[key] = true;
-            rows.push(matched[i]);
-          }
+    for (var a = 0; a < activeValues.length; a++) {
+      var matched = Platform.Function.LookupRows(SECURITY_POLICY_DE_KEY, "Active", activeValues[a]) || [];
+      for (var i = 0; i < matched.length; i++) {
+        var key = [
+          matched[i].UserName || "",
+          matched[i].EmailAddress || "",
+          matched[i].UserDisplayName || "",
+          matched[i].AllowedMID || "",
+          matched[i].AllowedFolderName || "",
+          matched[i].AllowedDEPattern || ""
+        ].join("|");
+        if (!seen[key]) {
+          seen[key] = true;
+          rows.push(matched[i]);
         }
       }
     }
@@ -711,7 +691,6 @@ function getSecurityPolicyRows() {
 
 function getAccessPolicyFieldDefinitions() {
   return [
-    { Name: "UserKey", FieldType: "Text", MaxLength: 100, IsRequired: false },
     { Name: "UserName", FieldType: "Text", MaxLength: 254, IsRequired: false },
     { Name: "EmailAddress", FieldType: "EmailAddress", MaxLength: 254, IsRequired: false },
     { Name: "UserDisplayName", FieldType: "Text", MaxLength: 254, IsRequired: false },
@@ -794,7 +773,6 @@ function getMatchingSecurityPolicies(context) {
   }
 
   var matches = [];
-  var runner = normalizeSecurityValue(context.runnerId);
   var bu = normalizeSecurityValue(context.businessUnitId);
   var userName = normalizeSecurityValue(context.userName);
   var emailAddress = normalizeSecurityValue(context.emailAddress);
@@ -803,21 +781,52 @@ function getMatchingSecurityPolicies(context) {
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     if (!isTruthySecurityValue(row.Active)) continue;
-    var rowUser = normalizeSecurityValue(row.UserKey);
     var rowUserName = normalizeSecurityValue(row.UserName);
     var rowEmailAddress = normalizeSecurityValue(row.EmailAddress);
     var rowUserDisplayName = normalizeSecurityValue(row.UserDisplayName);
     var rowMid = normalizeSecurityValue(row.AllowedMID);
+    var rowHasIdentity = !!(rowUserName || rowEmailAddress || rowUserDisplayName);
     var userMatches =
-      !rowUser || rowUser === "*" ||
-      (runner && rowUser === runner) ||
-      (userName && (rowUser === userName || rowUserName === userName)) ||
-      (emailAddress && (rowUser === emailAddress || rowEmailAddress === emailAddress)) ||
-      (userDisplayName && (rowUser === userDisplayName || rowUserDisplayName === userDisplayName));
+      !rowHasIdentity ||
+      (userName && rowUserName === userName) ||
+      (emailAddress && rowEmailAddress === emailAddress) ||
+      (userDisplayName && rowUserDisplayName === userDisplayName);
     var midMatches = !rowMid || rowMid === "*" || rowMid === bu;
     if (userMatches && midMatches) matches.push(row);
   }
   getMatchingSecurityPolicies._cache[cacheKey] = matches;
+  return matches;
+}
+
+function getMatchingSecurityPoliciesForSessionFallback(context) {
+  var rows = getSecurityPolicyRows();
+  if (!rows || !rows.length) return null;
+
+  var matches = [];
+  var bu = normalizeSecurityValue(context && context.businessUnitId);
+  var userName = normalizeSecurityValue(context && context.userName);
+  var emailAddress = normalizeSecurityValue(context && context.emailAddress);
+  var userDisplayName = normalizeSecurityValue(context && context.userDisplayName);
+  var contextHasIdentity = !!(userName || emailAddress || userDisplayName);
+
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    if (!isTruthySecurityValue(row.Active)) continue;
+    var rowUserName = normalizeSecurityValue(row.UserName);
+    var rowEmailAddress = normalizeSecurityValue(row.EmailAddress);
+    var rowUserDisplayName = normalizeSecurityValue(row.UserDisplayName);
+    var rowMid = normalizeSecurityValue(row.AllowedMID);
+    var rowHasIdentity = !!(rowUserName || rowEmailAddress || rowUserDisplayName);
+    var userMatches =
+      !rowHasIdentity ||
+      !contextHasIdentity ||
+      (userName && rowUserName === userName) ||
+      (emailAddress && rowEmailAddress === emailAddress) ||
+      (userDisplayName && rowUserDisplayName === userDisplayName);
+    var midMatches = !rowMid || rowMid === "*" || rowMid === bu;
+    if (userMatches && midMatches) matches.push(row);
+  }
+
   return matches;
 }
 
@@ -851,9 +860,6 @@ function getPolicyUserDetails(policies, context) {
 function getPolicyIdentityFallbackForSession(identity, businessUnitId) {
   var fallback = {};
   try {
-    var rows = getSecurityPolicyRows();
-    if (!rows || !rows.length) return fallback;
-
     var context = {
       runnerId: identity && identity.userKey ? identity.userKey : "OAuthAuthenticated",
       businessUnitId: businessUnitId || "",
@@ -861,38 +867,7 @@ function getPolicyIdentityFallbackForSession(identity, businessUnitId) {
       emailAddress: identity && identity.emailAddress ? identity.emailAddress : "",
       userDisplayName: identity && identity.userDisplayName ? identity.userDisplayName : ""
     };
-    var bu = normalizeSecurityValue(businessUnitId || "");
-    var runner = normalizeSecurityValue(context.runnerId);
-    var userName = normalizeSecurityValue(context.userName);
-    var emailAddress = normalizeSecurityValue(context.emailAddress);
-    var userDisplayName = normalizeSecurityValue(context.userDisplayName);
-
-    var matched = [];
-    var best = null;
-    var bestScore = 0;
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i];
-      if (!isTruthySecurityValue(row.Active)) continue;
-      var rowMid = normalizeSecurityValue(row.AllowedMID);
-      if (rowMid && rowMid !== "*" && rowMid !== bu) continue;
-
-      matched.push(row);
-      var score = 0;
-      var rowUser = normalizeSecurityValue(row.UserKey);
-      var rowUserName = normalizeSecurityValue(row.UserName);
-      var rowEmailAddress = normalizeSecurityValue(row.EmailAddress);
-      var rowUserDisplayName = normalizeSecurityValue(row.UserDisplayName);
-      if (runner && runner !== "oauthauthenticated" && rowUser && rowUser === runner) score += 4;
-      if (userName && (rowUser === userName || rowUserName === userName)) score += 3;
-      if (emailAddress && (rowUser === emailAddress || rowEmailAddress === emailAddress)) score += 3;
-      if (userDisplayName && (rowUser === userDisplayName || rowUserDisplayName === userDisplayName)) score += 2;
-      if (score > bestScore) {
-        bestScore = score;
-        best = row;
-      }
-    }
-
-    if (bestScore > 0 && best) return getPolicyUserDetails([best], context);
+    var matched = getMatchingSecurityPoliciesForSessionFallback(context);
     if (matched.length === 1) return getPolicyUserDetails([matched[0]], context);
   } catch (e) {}
   return fallback;
