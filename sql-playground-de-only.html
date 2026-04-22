@@ -970,14 +970,6 @@ function refsAreDataViewOnly(refs) {
   return true;
 }
 
-function refsAreTempOnly(refs) {
-  if (!refs || !refs.length) return false;
-  for (var i = 0; i < refs.length; i++) {
-    if (!refs[i].isTemp) return false;
-  }
-  return true;
-}
-
 function hasOAuthSessionCookie() {
   var sessionId = getCookieValue(SECURITY_OAUTH_COOKIE_NAME);
   return /^[0-9a-f-]{20,}$/i.test(String(sessionId || ""));
@@ -1001,21 +993,6 @@ function enforceQuerySecurity(sqlText, authGate) {
   if (!readOnly.ok) return readOnly;
 
   var refs = extractSqlObjectReferences(sqlText);
-
-  if (hasOAuthSessionCookie() && refsAreTempOnly(refs)) {
-    return {
-      ok: true,
-      context: {
-        runnerId: "OAuthCookie",
-        businessUnitId: "Unknown",
-        userName: "",
-        emailAddress: "",
-        userDisplayName: ""
-      },
-      references: refs,
-      policyMode: "oauth_temp_de_fast_path"
-    };
-  }
 
   if (hasOAuthSessionCookie() && refsAreDataViewOnly(refs)) {
     return {
