@@ -4734,6 +4734,26 @@ function parseRemoteDEQuery(sql) {
   };
 }
 
+function extractRemoteSqlReferences(sql) {
+  const cleaned = String(sql || '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--.*$/gm, ' ');
+  const refs = [];
+  const re = /\b(?:from|join)\s+((?:ENT\.)?\[[^\]]+\]|(?:ENT\.)?[A-Za-z_][A-Za-z0-9_]*|_[A-Za-z][A-Za-z0-9_]*)/gi;
+  let match;
+  while ((match = re.exec(cleaned)) !== null) {
+    const raw = String(match[1] || '').trim();
+    const isEnt = /^ENT\./i.test(raw);
+    const name = raw.replace(/^ENT\./i, '').replace(/^\[/, '').replace(/\]$/, '');
+    refs.push({
+      raw,
+      name,
+      type: isEnt ? 'ENT_DATA_EXTENSION' : (name.indexOf('_') === 0 ? 'DATA_VIEW' : 'DATA_EXTENSION')
+    });
+  }
+  return refs;
+}
+
 function shouldRunRemoteQuery(sql) {
   const refs = [];
   const re = /\b(?:from|join)\s+((?:ENT\.)?\[[^\]]+\]|(?:ENT\.)?[A-Za-z_][A-Za-z0-9_]*|_[A-Za-z][A-Za-z0-9_]*)/gi;
@@ -4889,6 +4909,7 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     throw new Error('QueryDefinition was submitted but no TaskID was returned.');
   }
   try {
+    const submittedReferences = extractRemoteSqlReferences(sql);
     const submitAuditResp = await postApi({
       action: 'auditClientEvent',
       status: 'QueryDefinitionSubmitted',
@@ -4898,7 +4919,7 @@ async function runRemoteQueryDefinition(sql, options = {}) {
       taskId: taskId,
       queryText: sql,
       rowCount: 0,
-      references: [{
+      references: submittedReferences.length ? submittedReferences : [{
         raw: submitted.queryKey || 'QueryDefinition',
         name: submitted.queryKey || 'QueryDefinition',
         type: 'QUERY_DEFINITION'
