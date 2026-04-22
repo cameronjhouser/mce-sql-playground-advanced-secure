@@ -2813,13 +2813,10 @@ if (isApiRequest) {
           var resultName = "QP_RES_" + shortToken;
           var queryKey = "QP_QRY_" + shortToken;
           var queryName = "QP_QRY_" + shortToken;
-          var queryFolderInfo = getPlaygroundQueryFolder();
-
           var auditMeta = getExecutionAuditMetadata(sqlText, resultKey);
           var resultDescription = buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "result DE", auditMeta);
           var queryDescription = buildTempAssetDescription(formatRetentionDate(0), formatRetentionDate(21), "query definition", auditMeta);
           var deCreate = createTempResultDataExtension(resultKey, resultName, derived.columns);
-          var folderInfo = getPlaygroundFolder();
           var retentionUpdate = null;
           var usedRetention = false;
           var retentionErrorMessage = "Retention update deferred to a follow-up request to avoid CloudPage timeout.";
@@ -2840,8 +2837,8 @@ if (isApiRequest) {
               step: "create_temp_result_de",
               resultKey: resultKey,
               resultName: resultName,
-              resultFolderId: folderInfo ? folderInfo.ID : null,
-              resultFolderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
+              resultFolderId: null,
+              resultFolderName: "AcademyMCEPlayground",
               requestedRetentionDays: 21,
               requestedRetentionPolicy: "All records and data extensions",
               retentionErrorMessage: null,
@@ -2849,58 +2846,41 @@ if (isApiRequest) {
               deCreate: deCreate
             }));
           } else {
-          updateDataExtensionDescription(resultKey, resultDescription);
-          var qdCreate = createTempQueryDefinition(queryKey, queryName, sqlText, resultKey, resultName);
+            var qdCreate = createFastTempQueryDefinition(queryKey, queryName, sqlText, resultKey, resultName);
 
-          if (qdCreate && qdCreate.Status && String(qdCreate.Status).toLowerCase() === "error") {
-            safeWriteQueryAuditEvent({
-              runId: runToken,
-              status: "Failed",
-              sqlText: sqlText,
-              resultKey: resultKey,
-              queryKey: queryKey,
-              errorMessage: "QueryDefinition was created but could not be retrieved for execution.",
-              context: securityCheck.context,
-              references: securityCheck.references,
-              securityMode: securityCheck.policyMode
-            });
-            Write(apiFail("Temporary QueryDefinition creation failed.", {
-              step: "create_query_definition",
-              queryKey: queryKey,
-              deCreate: deCreate,
-              qdCreate: qdCreate
-            }));
-          } else {
-            try {
-              var proxQdDesc = new Script.Util.WSProxy();
-              proxQdDesc.updateItem("QueryDefinition", {
-                CustomerKey: queryKey,
-                Description: queryDescription
+            if (qdCreate && qdCreate.Status && String(qdCreate.Status).toLowerCase() === "error") {
+              safeWriteQueryAuditEvent({
+                runId: runToken,
+                status: "Failed",
+                sqlText: sqlText,
+                resultKey: resultKey,
+                queryKey: queryKey,
+                errorMessage: "Temporary QueryDefinition creation failed.",
+                context: securityCheck.context,
+                references: securityCheck.references,
+                securityMode: securityCheck.policyMode
               });
-            } catch (descErr) {}
-            var qdCreateObjectId = extractCreatedObjectId(qdCreate);
-            var qd = getQueryDefinitionByKeyWithRetry(queryKey, 5, 500);
-            if ((!qd || !qd.ObjectID) && qdCreateObjectId) {
-              qd = {
-                ObjectID: qdCreateObjectId,
+              Write(apiFail("Temporary QueryDefinition creation failed.", {
+                step: "create_query_definition",
+                queryKey: queryKey,
+                deCreate: deCreate,
+                qdCreate: qdCreate
+              }));
+            } else {
+              var qdCreateObjectId = extractCreatedObjectId(qdCreate);
+              var qd = {
+                ObjectID: qdCreateObjectId || "",
                 CustomerKey: queryKey,
                 Name: queryName
               };
-            }
-            if (!qd || !qd.ObjectID) {
-              Write(apiFail("QueryDefinition was created but could not be retrieved for execution.", {
-                step: "retrieve_query_definition",
-                queryKey: queryKey,
-                deCreate: deCreate,
-                qdCreate: qdCreate,
-                createResultObjectId: qdCreateObjectId,
-                retrievedQueryDefinition: qd || null
-              }));
-            } else {
+              if (!qd.ObjectID) {
+                var qdLookup = getQueryDefinitionByKey(queryKey);
+                if (qdLookup && qdLookup.ObjectID) qd.ObjectID = qdLookup.ObjectID;
+              }
               var performResult = null;
               var taskId = null;
               if (!body.prepareOnly) {
-                performResult = performQueryDefinition(qd.ObjectID);
+                performResult = startQueryDefinition(qd.ObjectID ? { ObjectID: qd.ObjectID } : { CustomerKey: queryKey });
                 taskId = extractTaskId(performResult);
               }
               var auditSubmitResult = { Status: "Deferred", StatusMessage: "Submit audit is written by a follow-up client request to keep QueryDefinition submit under the CloudPage timeout." };
@@ -2911,10 +2891,10 @@ if (isApiRequest) {
                 queryObjectId: qd.ObjectID,
                 resultKey: resultKey,
                 resultName: resultName,
-                resultFolderId: folderInfo ? folderInfo.ID : null,
-                resultFolderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
-                queryFolderId: queryFolderInfo ? queryFolderInfo.ID : null,
-                queryFolderName: queryFolderInfo ? queryFolderInfo.Name : "AcademyMCEPlayground",
+                resultFolderId: null,
+                resultFolderName: "AcademyMCEPlayground",
+                queryFolderId: null,
+                queryFolderName: "Automation Studio",
                 retentionDays: usedRetention ? 21 : null,
                 retentionPolicy: usedRetention ? "All records and data extensions" : "Not applied",
                 retentionRequestedDays: 21,
@@ -2933,7 +2913,7 @@ if (isApiRequest) {
                   references: extractSqlObjectReferences(sqlText)
                 },
                 cleanupMetadata: {
-                  folderName: folderInfo ? folderInfo.Name : "AcademyMCEPlayground",
+                  folderName: "AcademyMCEPlayground",
                   resultPrefix: "QP_RES_",
                   queryPrefix: "QP_QRY_",
                   descriptionFields: ["CreatedUTC", "ExpiresUTC", "Source"]
@@ -2944,7 +2924,6 @@ if (isApiRequest) {
                 taskId: taskId
               }));
             }
-          }
           }
         }
         }
