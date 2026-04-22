@@ -1108,6 +1108,30 @@ function retrieveDeRowsViaWSProxyWithLimit(customerKey, columns, limitCount) {
   return retrieveDeRowsViaWSProxy(customerKey, columns, limitCount);
 }
 
+function retrieveDeRowsViaWSProxyBatch(customerKey, columns, requestId) {
+  var prox = new Script.Util.WSProxy();
+  var objectType = "DataExtensionObject[" + customerKey + "]";
+  var resp = requestId ? prox.getNextBatch(objectType, requestId) : prox.retrieve(objectType, columns);
+  var rows = [];
+
+  if (resp && resp.Results) {
+    for (var i = 0; i < resp.Results.length; i++) {
+      var row = {};
+      var props = resp.Results[i].Properties || [];
+      for (var j = 0; j < props.length; j++) {
+        row[props[j].Name] = props[j].Value;
+      }
+      rows.push(row);
+    }
+  }
+
+  return {
+    rows: rows,
+    requestId: resp && resp.RequestID ? resp.RequestID : (requestId || ""),
+    hasMoreRows: !!(resp && resp.HasMoreRows)
+  };
+}
+
 function splitTopLevelCommaList(text) {
   var items = [];
   var current = "";
@@ -2823,8 +2847,8 @@ if (isApiRequest) {
   } else if (body.action === "getQueryDefinitionResults") {
     try {
       var resultFormat = ssjsTrim(String(body.format || "table")).toLowerCase() === "rows" ? "rows" : "table";
-      var maxRows = Math.max(1, Math.min(2500, parseInt(body.maxRows, 10) || 2500));
-      var resultRows = retrieveDeRowsViaWSProxyWithLimit(body.resultKey || "", body.columns || [], maxRows);
+      var resultBatch = retrieveDeRowsViaWSProxyBatch(body.resultKey || "", body.columns || [], body.requestId || "");
+      var resultRows = resultBatch.rows || [];
       var resultValues = [];
       var rowObjects = [];
       for (var rr = 0; rr < resultRows.length; rr++) {
@@ -2850,8 +2874,8 @@ if (isApiRequest) {
           resultKey: body.resultKey || "",
           format: "rows",
           rowCount: rowObjects.length,
-          maxRows: maxRows,
-          isPreview: rowObjects.length >= maxRows,
+          requestId: resultBatch.requestId,
+          hasMoreRows: resultBatch.hasMoreRows,
           auditLogResult: completionAuditResult,
           columns: body.columns || [],
           rows: rowObjects
@@ -2862,8 +2886,8 @@ if (isApiRequest) {
           resultKey: body.resultKey || "",
           format: "table",
           rowCount: resultValues.length,
-          maxRows: maxRows,
-          isPreview: resultValues.length >= maxRows,
+          requestId: resultBatch.requestId,
+          hasMoreRows: resultBatch.hasMoreRows,
           auditLogResult: completionAuditResult,
           columns: body.columns || [],
           values: resultValues
@@ -4629,20 +4653,35 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     throw new Error('Query timed out while waiting for completion.');
   }
 
-  const results = await postApi({
-    action: 'getQueryDefinitionResults',
+  const resultData = {
+    dataExtension: submitted.resultKey,
     resultKey: submitted.resultKey,
+    format: resultFormat,
+    rowCount: 0,
     columns: submitted.columns,
-    queryText: sql,
-    runToken: submitted.runToken,
-    queryKey: submitted.queryKey,
-    taskId: submitted.taskId,
-    securityMode: submitted.security?.mode || '',
-    maxRows: 2500,
-    format: resultFormat
-  });
-  setRemoteRunPhase('fetching', `Loading results from ${submitted.resultKey}…`);
-  logRemoteStep('query_definition:results', {
+    values: [],
+    rows: []
+  };
+  let resultRequestId = '';
+  let hasMoreResultRows = true;
+  let resultPage = 0;
+  while (hasMoreResultRows) {
+    setRemoteRunPhase('fetching', `Loading results from ${submitted.resultKey}... ${resultData.rowCount} rows loaded`);
+    const results = await postApi({
+      action: 'getQueryDefinitionResults',
+      resultKey: submitted.resultKey,
+      columns: submitted.columns,
+      queryText: sql,
+      runToken: submitted.runToken,
+      queryKey: submitted.queryKey,
+      taskId: submitted.taskId,
+      securityMode: submitted.security?.mode || '',
+      requestId: resultRequestId,
+      format: resultFormat
+    });
+  resultPage++;
+  logRemoteStep('query_definition:results_page', {
+    page: resultPage,
     status: results.res.status,
     ok: results.res.ok,
     bodyPreview: results.raw.slice(0, 220)
@@ -4654,12 +4693,25 @@ async function runRemoteQueryDefinition(sql, options = {}) {
   if (!results.json.ok) {
     throw new Error(results.json.error?.message || 'getQueryDefinitionResults failed.');
   }
+
+    const pageData = results.json.data || {};
+    if (resultFormat === 'rows') {
+      resultData.rows = resultData.rows.concat(pageData.rows || []);
+      resultData.rowCount = resultData.rows.length;
+    } else {
+      resultData.values = resultData.values.concat(pageData.values || []);
+      resultData.rowCount = resultData.values.length;
+    }
+    resultData.columns = pageData.columns || resultData.columns;
+    resultRequestId = pageData.requestId || '';
+    hasMoreResultRows = !!(pageData.hasMoreRows && resultRequestId);
+  }
   logRemoteStep('query_definition:results_summary', {
     resultKey: submitted.resultKey,
-    rowCount: (results.json.data && (results.json.data.values || results.json.data.rows)) ? (results.json.data.values || results.json.data.rows).length : 0,
-    columnCount: (results.json.data && results.json.data.columns) ? results.json.data.columns.length : 0,
-    sampleRow: (results.json.data && results.json.data.values && results.json.data.values.length) ? results.json.data.values[0] :
-      ((results.json.data && results.json.data.rows && results.json.data.rows.length) ? results.json.data.rows[0] : null)
+    rowCount: resultData.rowCount,
+    columnCount: resultData.columns ? resultData.columns.length : 0,
+    sampleRow: resultData.values && resultData.values.length ? resultData.values[0] :
+      ((resultData.rows && resultData.rows.length) ? resultData.rows[0] : null)
   });
 
   if (submitted.queryObjectId || submitted.queryKey) {
@@ -4679,7 +4731,6 @@ async function runRemoteQueryDefinition(sql, options = {}) {
     }
   }
 
-  const resultData = results.json.data || {};
   resultData.runToken = submitted.runToken;
   resultData.queryKey = submitted.queryKey;
   resultData.taskId = submitted.taskId;
