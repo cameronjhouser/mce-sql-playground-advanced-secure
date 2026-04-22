@@ -558,7 +558,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "submitQueryDefinitionRun" || action === "getQueryDefinitionStatus" || action === "getQueryDefinitionResults" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "authorizePreparedQueryDefinition" || action === "createAuthorizedPreparedQueryDefinition" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "submitQueryDefinitionRun" || action === "getQueryDefinitionStatus" || action === "getQueryDefinitionResults" || action === "getDirectTempDataExtensionResults" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "authorizePreparedQueryDefinition" || action === "createAuthorizedPreparedQueryDefinition" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
   return true;
 }
 
@@ -1096,6 +1096,12 @@ function parseSimpleDeSql(sql) {
   if (!match) return null;
 
   var colsRaw = ssjsTrim(match[1]);
+  var topCount = 0;
+  var topMatch = colsRaw.match(/^top\s+(\d+)\s+([\s\S]+)$/i);
+  if (topMatch) {
+    topCount = Math.max(0, parseInt(topMatch[1], 10) || 0);
+    colsRaw = ssjsTrim(topMatch[2]);
+  }
   var deName = trimBrackets(ssjsTrim(match[2]));
   var cols = [];
 
@@ -1110,7 +1116,8 @@ function parseSimpleDeSql(sql) {
 
   return {
     deName: deName,
-    columns: colsRaw === "*" ? ["*"] : cols
+    columns: colsRaw === "*" ? ["*"] : cols,
+    limitCount: topCount
   };
 }
 
@@ -3069,6 +3076,87 @@ if (isApiRequest) {
         message: String(statusErr)
       }));
     }
+  } else if (body.action === "getDirectTempDataExtensionResults") {
+    try {
+      var directSql = ssjsTrim(String(body.sql || ""));
+      var directParsed = parseSimpleDeSql(directSql);
+      var directFormat = ssjsTrim(String(body.format || "table")).toLowerCase() === "rows" ? "rows" : "table";
+
+      if (!directParsed) {
+        Write(apiFail("Direct temp Data Extension reads only support simple SELECT column lists from one temp Data Extension.", {
+          step: "parse_direct_temp_de_query"
+        }));
+      } else if (!isTempSecurityObject(directParsed.deName)) {
+        Write(apiFail("Direct reads are only available for playground temporary Data Extensions.", {
+          step: "validate_direct_temp_de",
+          dataExtension: directParsed.deName
+        }));
+      } else {
+        var directSecurityCheck = enforceQuerySecurity(directSql, apiAuthGate);
+        if (!directSecurityCheck.ok) {
+          Write(apiFail(directSecurityCheck.message || "Query blocked by playground security policy.", {
+            step: "security_policy",
+            object: directSecurityCheck.object || null
+          }));
+        } else {
+          var directColumns = directParsed.columns || [];
+          if (directColumns.length === 1 && directColumns[0] === "*") {
+            directColumns = getDeFieldNames(directParsed.deName);
+          }
+          var directRows = retrieveDeRowsViaWSProxy(directParsed.deName, directColumns, directParsed.limitCount || 0);
+          var directValues = [];
+          var directObjects = [];
+          for (var dr = 0; dr < directRows.length; dr++) {
+            var directRow = [];
+            var directObject = {};
+            for (var dc = 0; dc < directColumns.length; dc++) {
+              var directField = directColumns[dc];
+              var directValue = directRows[dr][directField];
+              directRow.push(directValue || null);
+              directObject[directField] = directValue || null;
+            }
+            directValues.push(directRow);
+            directObjects.push(directObject);
+          }
+          if (directFormat === "rows") {
+            Write(apiOk({
+              dataExtension: directParsed.deName,
+              resultKey: directParsed.deName,
+              direct: true,
+              format: "rows",
+              rowCount: directObjects.length,
+              columns: directColumns,
+              rows: directObjects,
+              security: {
+                mode: directSecurityCheck.policyMode,
+                context: directSecurityCheck.context,
+                references: directSecurityCheck.references
+              }
+            }));
+          } else {
+            Write(apiOk({
+              dataExtension: directParsed.deName,
+              resultKey: directParsed.deName,
+              direct: true,
+              format: "table",
+              rowCount: directValues.length,
+              columns: directColumns,
+              values: directValues,
+              security: {
+                mode: directSecurityCheck.policyMode,
+                context: directSecurityCheck.context,
+                references: directSecurityCheck.references
+              }
+            }));
+          }
+        }
+      }
+    } catch (directErr) {
+      Write(apiFail("getDirectTempDataExtensionResults failed.", {
+        step: "get_direct_temp_de_results",
+        message: String(directErr)
+      }));
+    }
   } else if (body.action === "getQueryDefinitionResults") {
     try {
       var resultFormat = ssjsTrim(String(body.format || "table")).toLowerCase() === "rows" ? "rows" : "table";
@@ -4761,6 +4849,19 @@ function parseRemoteDEQuery(sql) {
   };
 }
 
+function parseDirectTempDEQuery(sql) {
+  const cleaned = String(sql || '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--.*$/gm, ' ')
+    .trim();
+  if (/\b(join|group\s+by|having|union|intersect|except|with|where|order\s+by)\b/i.test(cleaned)) return null;
+  const match = cleaned.match(/^\s*select\s+(?:top\s+\d+\s+)?([\s\S]+?)\s+from\s+(\[[^\]]+\]|QP_(?:SRC|RES)_[A-Za-z0-9_]+)\s*;?\s*$/i);
+  if (!match) return null;
+  const dataExtension = match[2].replace(/^\[/, '').replace(/\]$/, '');
+  if (!/^QP_(SRC|RES)_/i.test(dataExtension)) return null;
+  return { dataExtension };
+}
+
 function shouldRunRemoteQuery(sql) {
   const refs = [];
   const re = /\b(?:from|join)\s+((?:ENT\.)?\[[^\]]+\]|(?:ENT\.)?[A-Za-z_][A-Za-z0-9_]*|_[A-Za-z][A-Za-z0-9_]*)/gi;
@@ -4884,6 +4985,54 @@ async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
   startRemoteRunUi('queued', 'Preparing SFMC query run...');
   logRemoteStep('query_definition:sql', sql);
+
+  const directTempQuery = parseDirectTempDEQuery(sql);
+  if (directTempQuery) {
+    setRemoteRunPhase('fetching', `Reading directly from ${directTempQuery.dataExtension}...`);
+    const directResp = await postApi({
+      action: 'getDirectTempDataExtensionResults',
+      sql,
+      format: resultFormat
+    });
+    logRemoteStep('query_definition:direct_temp_results', {
+      status: directResp.res.status,
+      ok: directResp.res.ok,
+      bodyPreview: directResp.raw.slice(0, 220)
+    });
+    if (!directResp.json) {
+      throw new Error(`getDirectTempDataExtensionResults returned HTTP ${directResp.res.status} ${directResp.res.statusText}. Response starts with: ${directResp.raw.slice(0, 160)}`);
+    }
+    if (!directResp.json.ok) {
+      throw new Error(directResp.json.error?.message || 'getDirectTempDataExtensionResults failed.');
+    }
+
+    const directData = directResp.json.data || {};
+    try {
+      const directAuditResp = await postApi({
+        action: 'auditClientEvent',
+        status: 'DirectTempDERead',
+        resultKey: directData.resultKey || directTempQuery.dataExtension,
+        queryText: sql,
+        rowCount: directData.rowCount || ((directData.values || directData.rows || []).length),
+        references: directData.security?.references || [{
+          raw: directTempQuery.dataExtension,
+          name: directTempQuery.dataExtension,
+          type: 'TEMP_DATA_EXTENSION'
+        }],
+        securityMode: directData.security?.mode || 'direct_temp_de'
+      });
+      logRemoteStep('audit:direct_temp_de_read', {
+        status: directAuditResp.res.status,
+        ok: directAuditResp.res.ok,
+        bodyPreview: directAuditResp.raw.slice(0, 180)
+      });
+    } catch (directAuditErr) {
+      logRemoteStep('audit:direct_temp_de_read_error', String(directAuditErr));
+    }
+    directData.direct = true;
+    directData.securityMode = directData.security?.mode || 'direct_temp_de';
+    return directData;
+  }
 
   async function postPreparedStep(payload, label) {
     logRemoteStep(`query_definition:${label}:start`, {
