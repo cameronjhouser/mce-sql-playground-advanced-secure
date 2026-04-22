@@ -553,7 +553,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareLightQueryRun") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
   return true;
 }
 
@@ -613,6 +613,14 @@ function isTempSecurityObject(name) {
     if (value.indexOf(SECURITY_TEMP_PREFIXES[i]) === 0) return true;
   }
   return false;
+}
+
+function isTempResultKey(key) {
+  return String(key || "").indexOf("QP_RES_") === 0;
+}
+
+function isTempQueryKey(key) {
+  return String(key || "").indexOf("QP_QRY_") === 0;
 }
 
 function wildcardToRegExp(pattern) {
@@ -2234,12 +2242,19 @@ if (isApiRequest) {
     try {
       var cleanupObjectId = ssjsTrim(String(body.queryObjectId || ""));
       var cleanupQueryKey = ssjsTrim(String(body.queryKey || ""));
-      var cleanupResult = deleteTempQueryDefinition(cleanupObjectId, cleanupQueryKey);
-      Write(apiOk({
-        queryObjectId: cleanupObjectId,
-        queryKey: cleanupQueryKey,
-        deleteResult: cleanupResult
-      }));
+      if (!isTempQueryKey(cleanupQueryKey)) {
+        Write(apiFail("Only playground temporary QueryDefinitions can be cleaned up from this endpoint.", {
+          step: "cleanup_temp_query_definition",
+          queryKey: cleanupQueryKey
+        }));
+      } else {
+        var cleanupResult = deleteTempQueryDefinition(cleanupObjectId, cleanupQueryKey);
+        Write(apiOk({
+          queryObjectId: cleanupObjectId,
+          queryKey: cleanupQueryKey,
+          deleteResult: cleanupResult
+        }));
+      }
     } catch (cleanupErr) {
       Write(apiFail("cleanupTempQueryDefinition failed.", {
         step: "cleanup_temp_query_definition",
@@ -2309,6 +2324,11 @@ if (isApiRequest) {
           resultKey: preparedResultKey,
           columnCount: preparedColumns.length
         }));
+      } else if (!isTempResultKey(preparedResultKey)) {
+        Write(apiFail("Only playground temporary result Data Extensions can be created from this endpoint.", {
+          step: "create_prepared_result_de",
+          resultKey: preparedResultKey
+        }));
       } else {
         var preparedDeCreate = createTempResultDataExtension(preparedResultKey, preparedResultName, preparedColumns);
         if (preparedDeCreate && preparedDeCreate.Status && String(preparedDeCreate.Status).toLowerCase() === "error") {
@@ -2343,6 +2363,12 @@ if (isApiRequest) {
       var preparedQdResultName = ssjsTrim(String(body.resultName || preparedQdResultKey));
       if (!preparedQdKey || !preparedQdSql || !preparedQdResultKey) {
         Write(apiFail("QueryDefinition key, SQL, and result target are required.", {
+          step: "create_prepared_query_definition",
+          queryKey: preparedQdKey,
+          resultKey: preparedQdResultKey
+        }));
+      } else if (!isTempQueryKey(preparedQdKey) || !isTempResultKey(preparedQdResultKey)) {
+        Write(apiFail("Only playground temporary QueryDefinitions and result Data Extensions can be created from this endpoint.", {
           step: "create_prepared_query_definition",
           queryKey: preparedQdKey,
           resultKey: preparedQdResultKey
@@ -2564,6 +2590,11 @@ if (isApiRequest) {
         Write(apiFail("QueryDefinition CustomerKey is required.", {
           step: "start_prepared_query_definition"
         }));
+      } else if (!isTempQueryKey(preparedQueryKey)) {
+        Write(apiFail("Only playground temporary QueryDefinitions can be started from this endpoint.", {
+          step: "start_prepared_query_definition",
+          queryKey: preparedQueryKey
+        }));
       } else {
         var preparedPerformResult = startQueryDefinition({ CustomerKey: preparedQueryKey });
         var preparedTaskId = extractTaskId(preparedPerformResult);
@@ -2590,6 +2621,13 @@ if (isApiRequest) {
       var finalizeRetentionApplied = false;
       var finalizeRetentionError = "";
 
+      if ((finalizeResultKey && !isTempResultKey(finalizeResultKey)) || (finalizeQueryKey && !isTempQueryKey(finalizeQueryKey))) {
+        Write(apiFail("Only playground temporary assets can be finalized from this endpoint.", {
+          step: "finalize_prepared_query_metadata",
+          resultKey: finalizeResultKey,
+          queryKey: finalizeQueryKey
+        }));
+      } else {
       if (finalizeResultKey && finalizeResultDescription) {
         try { updateDataExtensionDescription(finalizeResultKey, finalizeResultDescription); } catch (finalizeDescErr) {}
       }
@@ -2617,6 +2655,7 @@ if (isApiRequest) {
         retentionErrorMessage: finalizeRetentionError,
         retentionUpdateResult: finalizeRetentionUpdate
       }));
+      }
     } catch (finalizeErr) {
       Write(apiFail("finalizePreparedQueryMetadata failed.", {
         step: "finalize_prepared_query_metadata",
