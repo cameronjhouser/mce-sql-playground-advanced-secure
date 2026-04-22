@@ -324,7 +324,6 @@ function ensureOAuthSessionDataExtension() {
       { Name: "SessionID", FieldType: "Text", MaxLength: 36, IsRequired: true, IsPrimaryKey: true },
       { Name: "CreatedUTC", FieldType: "Date", IsRequired: false },
       { Name: "ExpiresUTC", FieldType: "Date", IsRequired: false },
-      { Name: "UserKey", FieldType: "Text", MaxLength: 100, IsRequired: false },
       { Name: "UserName", FieldType: "Text", MaxLength: 254, IsRequired: false },
       { Name: "EmailAddress", FieldType: "EmailAddress", MaxLength: 254, IsRequired: false },
       { Name: "UserDisplayName", FieldType: "Text", MaxLength: 254, IsRequired: false },
@@ -349,7 +348,6 @@ function ensureOAuthSessionDataExtensionFields(sessionKey) {
   }
 
   var definitions = [
-    { Name: "UserKey", FieldType: "Text", MaxLength: 100, IsRequired: false },
     { Name: "UserName", FieldType: "Text", MaxLength: 254, IsRequired: false },
     { Name: "EmailAddress", FieldType: "EmailAddress", MaxLength: 254, IsRequired: false },
     { Name: "UserDisplayName", FieldType: "Text", MaxLength: 254, IsRequired: false },
@@ -393,9 +391,9 @@ function storeOAuthSession(tokenResponse) {
   var userInfo = getOAuthUserInfo(tokenResponse);
   var identity = extractOAuthIdentity(tokenResponse, userInfo);
   var sessionId = Platform.Function.GUID();
-  var buId = null;
-  try { buId = Platform.Function.AccountID(); } catch (e1) {}
+  var buId = getRuntimeBusinessUnitId();
   buId = buId || tokenResponse.account_id || tokenResponse.accountId || getOAuthResponseValue(userInfo, ["account_id", "accountId", "member_id", "memberId"]) || "";
+  var policyIdentity = getPolicyIdentityFallbackForSession(identity, buId);
   var sessionKey = ensureOAuthSessionDataExtension();
   var sessionDe = DataExtension.Init(sessionKey);
   var expiresDate = addMinutesUtc(getOAuthConfig().sessionMinutes);
@@ -404,10 +402,9 @@ function storeOAuthSession(tokenResponse) {
     SessionID: sessionId,
     CreatedUTC: formatRetentionDate(0),
     ExpiresUTC: formatDateObjectForSfmc(expiresDate),
-    UserKey: identity.userKey,
-    UserName: identity.userName,
-    EmailAddress: identity.emailAddress,
-    UserDisplayName: identity.userDisplayName,
+    UserName: identity.userName || policyIdentity.userName || "",
+    EmailAddress: identity.emailAddress || policyIdentity.emailAddress || "",
+    UserDisplayName: identity.userDisplayName || policyIdentity.userDisplayName || "",
     BusinessUnitID: buId || "",
     RestInstanceUrl: tokenResponse.rest_instance_url || "",
     SoapInstanceUrl: tokenResponse.soap_instance_url || "",
@@ -849,6 +846,56 @@ function getPolicyUserDetails(policies, context) {
     }
   }
   return {};
+}
+
+function getPolicyIdentityFallbackForSession(identity, businessUnitId) {
+  var fallback = {};
+  try {
+    var rows = getSecurityPolicyRows();
+    if (!rows || !rows.length) return fallback;
+
+    var context = {
+      runnerId: identity && identity.userKey ? identity.userKey : "OAuthAuthenticated",
+      businessUnitId: businessUnitId || "",
+      userName: identity && identity.userName ? identity.userName : "",
+      emailAddress: identity && identity.emailAddress ? identity.emailAddress : "",
+      userDisplayName: identity && identity.userDisplayName ? identity.userDisplayName : ""
+    };
+    var bu = normalizeSecurityValue(businessUnitId || "");
+    var runner = normalizeSecurityValue(context.runnerId);
+    var userName = normalizeSecurityValue(context.userName);
+    var emailAddress = normalizeSecurityValue(context.emailAddress);
+    var userDisplayName = normalizeSecurityValue(context.userDisplayName);
+
+    var matched = [];
+    var best = null;
+    var bestScore = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (!isTruthySecurityValue(row.Active)) continue;
+      var rowMid = normalizeSecurityValue(row.AllowedMID);
+      if (rowMid && rowMid !== "*" && rowMid !== bu) continue;
+
+      matched.push(row);
+      var score = 0;
+      var rowUser = normalizeSecurityValue(row.UserKey);
+      var rowUserName = normalizeSecurityValue(row.UserName);
+      var rowEmailAddress = normalizeSecurityValue(row.EmailAddress);
+      var rowUserDisplayName = normalizeSecurityValue(row.UserDisplayName);
+      if (runner && runner !== "oauthauthenticated" && rowUser && rowUser === runner) score += 4;
+      if (userName && (rowUser === userName || rowUserName === userName)) score += 3;
+      if (emailAddress && (rowUser === emailAddress || rowEmailAddress === emailAddress)) score += 3;
+      if (userDisplayName && (rowUser === userDisplayName || rowUserDisplayName === userDisplayName)) score += 2;
+      if (score > bestScore) {
+        bestScore = score;
+        best = row;
+      }
+    }
+
+    if (bestScore > 0 && best) return getPolicyUserDetails([best], context);
+    if (matched.length === 1) return getPolicyUserDetails([matched[0]], context);
+  } catch (e) {}
+  return fallback;
 }
 
 function getPolicyPermissions(policies) {
