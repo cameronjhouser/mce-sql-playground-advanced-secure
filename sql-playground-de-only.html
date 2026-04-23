@@ -4430,30 +4430,28 @@ function updateDEUI(tableName, cols, rowCount) {
   info.innerHTML = `<div class="de-card-name">${esc(tableName)}</div><div class="de-card-meta">${esc(meta)}</div>`;
   const actions = document.createElement('div');
   actions.className = 'de-card-actions';
-  const tempBtn = document.createElement('button');
-  tempBtn.className = 'de-card-action';
-  if (de.tempDeStatus === 'creating') {
-    tempBtn.classList.add('busy');
-    tempBtn.textContent = 'Creating…';
-    tempBtn.disabled = true;
-  } else if (de.tempDeStatus === 'stale') {
-    tempBtn.textContent = 'Recreate Temp DE';
-    tempBtn.disabled = !authState.canCreateTempDE;
-    tempBtn.title = authState.canCreateTempDE ? '' : 'CanCreateTempDE permission required.';
-    tempBtn.onclick = () => createTempDEFromCsv(tableName);
-  } else if (de.tempDeStatus === 'ready' && de.tempDe && de.tempDe.name) {
-    tempBtn.classList.add('ready');
-    tempBtn.textContent = 'Query Temp DE';
-    tempBtn.onclick = () => queryTempDE(tableName);
-  } else {
-    tempBtn.textContent = 'Create Temp DE';
-    tempBtn.disabled = !authState.canCreateTempDE;
-    tempBtn.title = authState.canCreateTempDE ? '' : 'CanCreateTempDE permission required.';
-    tempBtn.onclick = () => createTempDEFromCsv(tableName);
+  if (authState.canCreateTempDE) {
+    const tempBtn = document.createElement('button');
+    tempBtn.className = 'de-card-action';
+    if (de.tempDeStatus === 'creating') {
+      tempBtn.classList.add('busy');
+      tempBtn.textContent = 'Creating…';
+      tempBtn.disabled = true;
+    } else if (de.tempDeStatus === 'stale') {
+      tempBtn.textContent = 'Recreate Temp DE';
+      tempBtn.onclick = () => createTempDEFromCsv(tableName);
+    } else if (de.tempDeStatus === 'ready' && de.tempDe && de.tempDe.name) {
+      tempBtn.classList.add('ready');
+      tempBtn.textContent = 'Query Temp DE';
+      tempBtn.onclick = () => queryTempDE(tableName);
+    } else {
+      tempBtn.textContent = 'Create Temp DE';
+      tempBtn.onclick = () => createTempDEFromCsv(tableName);
+    }
+    actions.appendChild(tempBtn);
   }
   const del = document.createElement('button');
   del.className = 'de-card-del'; del.textContent = '✕'; del.onclick = () => removeDE(tableName);
-  actions.appendChild(tempBtn);
   actions.appendChild(del);
   card.appendChild(info); card.appendChild(actions);
   document.getElementById('deCardList').appendChild(card);
