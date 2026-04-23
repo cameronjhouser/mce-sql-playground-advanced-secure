@@ -1021,21 +1021,6 @@ function enforceQuerySecurity(sqlText, authGate) {
 
   var refs = extractSqlObjectReferences(sqlText);
 
-  if (hasOAuthSessionCookie() && refsAreDataViewOnly(refs)) {
-    return {
-      ok: true,
-      context: {
-        runnerId: "OAuthCookie",
-        businessUnitId: "Unknown",
-        userName: "",
-        emailAddress: "",
-        userDisplayName: ""
-      },
-      references: refs,
-      policyMode: "oauth_data_view_fast_path"
-    };
-  }
-
   var context = authGate && authGate.context ? authGate.context : getCurrentSecurityContext();
   var policies = authGate && authGate.policies ? authGate.policies : getMatchingSecurityPolicies(context);
   if (!policies || !policies.length) {
@@ -2796,12 +2781,7 @@ if (isApiRequest) {
         }));
       } else {
         var readOnlyCheck = validateReadOnlySql(sqlText);
-        var securityCheck = readOnlyCheck.ok ? {
-          ok: true,
-          context: null,
-          references: [],
-          policyMode: "oauth_session_fast_path"
-        } : readOnlyCheck;
+        var securityCheck = readOnlyCheck.ok ? enforceQuerySecurity(sqlText, apiAuthGate) : readOnlyCheck;
         if (!securityCheck.ok) {
           safeWriteQueryAuditEvent({
             runId: Platform.Function.GUID(),
