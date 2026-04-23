@@ -394,21 +394,6 @@ function storeOAuthSession(tokenResponse) {
   var buId = getRuntimeBusinessUnitId();
   buId = buId || tokenResponse.account_id || tokenResponse.accountId || getOAuthResponseValue(userInfo, ["account_id", "accountId", "member_id", "memberId"]) || "";
   var policyIdentity = getPolicyIdentityFallbackForSession(identity, buId);
-  var effectiveIdentity = {
-    userName: identity.userName || policyIdentity.userName || "",
-    emailAddress: identity.emailAddress || policyIdentity.emailAddress || "",
-    userDisplayName: identity.userDisplayName || policyIdentity.userDisplayName || ""
-  };
-  var matchedPolicies = getMatchingSecurityPolicies({
-    runnerId: identity.userKey || "OAuthAuthenticated",
-    businessUnitId: buId || "",
-    userName: effectiveIdentity.userName,
-    emailAddress: effectiveIdentity.emailAddress,
-    userDisplayName: effectiveIdentity.userDisplayName
-  });
-  if (!matchedPolicies || !matchedPolicies.length) {
-    throw "No active access policy matched both UserName and EmailAddress for this Business Unit.";
-  }
   var sessionKey = ensureOAuthSessionDataExtension();
   var sessionDe = DataExtension.Init(sessionKey);
   var expiresDate = addMinutesUtc(getOAuthConfig().sessionMinutes);
@@ -417,9 +402,9 @@ function storeOAuthSession(tokenResponse) {
     SessionID: sessionId,
     CreatedUTC: formatRetentionDate(0),
     ExpiresUTC: formatDateObjectForSfmc(expiresDate),
-    UserName: effectiveIdentity.userName,
-    EmailAddress: effectiveIdentity.emailAddress,
-    UserDisplayName: effectiveIdentity.userDisplayName,
+    UserName: identity.userName || policyIdentity.userName || "",
+    EmailAddress: identity.emailAddress || policyIdentity.emailAddress || "",
+    UserDisplayName: identity.userDisplayName || policyIdentity.userDisplayName || "",
     BusinessUnitID: buId || "",
     RestInstanceUrl: tokenResponse.rest_instance_url || "",
     SoapInstanceUrl: tokenResponse.soap_instance_url || "",
@@ -485,7 +470,7 @@ function handleOAuthPageRequest() {
       storeOAuthSession(exchangeOAuthCode(code));
       Platform.Response.Redirect(ssjsTrim(getOAuthConfig().redirectUri));
     } catch (oauthErr) {
-      Variable.SetValue("@oauthError", String(oauthErr));
+      Variable.SetValue("@oauthError", "OAuth token exchange failed. Check the Installed Package client ID, client secret, tenant subdomain, and redirect URI.");
     }
   } else if (login == "1") {
     startOAuthLogin();
@@ -550,6 +535,9 @@ function isAuthorizedSecurityContext(context) {
 
 function requireAuthenticatedServerAccess(actionName) {
   var context = getCurrentSecurityContext();
+  if (actionName !== "authStatus" && isOAuthLoginEnabled() && getOAuthSession()) {
+    return { ok: true, context: context, policies: null, sessionOnly: true };
+  }
   var policies = getMatchingSecurityPolicies(context);
   if (policies && policies.length) {
     var details = getPolicyUserDetails(policies, context);
@@ -795,10 +783,14 @@ function getMatchingSecurityPolicies(context) {
     if (!isTruthySecurityValue(row.Active)) continue;
     var rowUserName = normalizeSecurityValue(row.UserName);
     var rowEmailAddress = normalizeSecurityValue(row.EmailAddress);
+    var rowUserDisplayName = normalizeSecurityValue(row.UserDisplayName);
     var rowMid = normalizeSecurityValue(row.AllowedMID);
+    var rowHasIdentity = !!(rowUserName || rowEmailAddress || rowUserDisplayName);
     var userMatches =
-      !!(userName && emailAddress && rowUserName && rowEmailAddress &&
-      rowUserName === userName && rowEmailAddress === emailAddress);
+      !rowHasIdentity ||
+      (userName && rowUserName === userName) ||
+      (emailAddress && rowEmailAddress === emailAddress) ||
+      (userDisplayName && rowUserDisplayName === userDisplayName);
     var midMatches = !rowMid || rowMid === "*" || rowMid === bu;
     if (userMatches && midMatches) matches.push(row);
   }
@@ -814,16 +806,23 @@ function getMatchingSecurityPoliciesForSessionFallback(context) {
   var bu = normalizeSecurityValue(context && context.businessUnitId);
   var userName = normalizeSecurityValue(context && context.userName);
   var emailAddress = normalizeSecurityValue(context && context.emailAddress);
+  var userDisplayName = normalizeSecurityValue(context && context.userDisplayName);
+  var contextHasIdentity = !!(userName || emailAddress || userDisplayName);
 
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     if (!isTruthySecurityValue(row.Active)) continue;
     var rowUserName = normalizeSecurityValue(row.UserName);
     var rowEmailAddress = normalizeSecurityValue(row.EmailAddress);
+    var rowUserDisplayName = normalizeSecurityValue(row.UserDisplayName);
     var rowMid = normalizeSecurityValue(row.AllowedMID);
+    var rowHasIdentity = !!(rowUserName || rowEmailAddress || rowUserDisplayName);
     var userMatches =
-      !!(userName && emailAddress && rowUserName && rowEmailAddress &&
-      rowUserName === userName && rowEmailAddress === emailAddress);
+      !rowHasIdentity ||
+      !contextHasIdentity ||
+      (userName && rowUserName === userName) ||
+      (emailAddress && rowEmailAddress === emailAddress) ||
+      (userDisplayName && rowUserDisplayName === userDisplayName);
     var midMatches = !rowMid || rowMid === "*" || rowMid === bu;
     if (userMatches && midMatches) matches.push(row);
   }
@@ -2247,7 +2246,7 @@ if (isApiRequest) {
     var authContext = getCurrentSecurityContext();
     var authPolicies = getMatchingSecurityPolicies(authContext);
     var oauthSession = getOAuthSession();
-    var isLoggedIn = !!(oauthSession && authPolicies && authPolicies.length);
+    var isLoggedIn = !!oauthSession;
     var authPermissions = getPolicyPermissions(authPolicies);
     if (authPolicies && authPolicies.length) {
       var authDetails = getPolicyUserDetails(authPolicies, authContext);
