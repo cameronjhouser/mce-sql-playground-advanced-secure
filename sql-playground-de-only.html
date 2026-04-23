@@ -562,7 +562,7 @@ function requireAuthenticatedServerAccess(actionName) {
 
 function isProtectedApiAction(actionName) {
   var action = String(actionName || "");
-  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "submitQueryDefinitionRun" || action === "getQueryDefinitionStatus" || action === "getQueryDefinitionResults" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "authorizePreparedQueryDefinition" || action === "createAuthorizedPreparedQueryDefinition" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
+  if (!action || action === "ping" || action === "debugEcho" || action === "authStatus" || action === "auditClientEvent" || action === "debugPreparePipeline" || action === "authorizeQueryRun" || action === "submitQueryDefinitionRun" || action === "getQueryDefinitionStatus" || action === "getQueryDefinitionResults" || action === "prepareLightQueryRun" || action === "createPreparedResultDataExtension" || action === "authorizePreparedQueryDefinition" || action === "createAuthorizedPreparedQueryDefinition" || action === "createPreparedQueryDefinition" || action === "startPreparedQueryDefinitionRun" || action === "finalizePreparedQueryMetadata" || action === "cleanupTempQueryDefinition") return false;
   return true;
 }
 
@@ -2239,6 +2239,37 @@ if (isApiRequest) {
       Write(apiFail("prepareLightQueryRun failed.", {
         step: "prepare_light_query_run",
         message: String(lightPrepareErr)
+      }));
+    }
+  } else if (body.action === "authorizeQueryRun") {
+    try {
+      var authorizeSql = ssjsTrim(String(body.sql || ""));
+      if (!authorizeSql) {
+        Write(apiFail("SQL text is required.", {
+          step: "authorize_query_run"
+        }));
+      } else {
+        var authorizeCheck = enforceQuerySecurity(authorizeSql, apiAuthGate);
+        if (!authorizeCheck.ok) {
+          Write(apiFail(authorizeCheck.message || "Query blocked by playground security policy.", {
+            step: "security_policy",
+            context: authorizeCheck.context || null,
+            object: authorizeCheck.object || null
+          }));
+        } else {
+          Write(apiOk({
+            security: {
+              mode: authorizeCheck.policyMode,
+              context: authorizeCheck.context || null,
+              references: authorizeCheck.references || []
+            }
+          }));
+        }
+      }
+    } catch (authorizeQueryErr) {
+      Write(apiFail("authorizeQueryRun failed.", {
+        step: "authorize_query_run",
+        message: String(authorizeQueryErr)
       }));
     }
   } else if (body.action === "authStatus") {
@@ -4898,6 +4929,26 @@ window.runRetentionDiagnostic = runRetentionDiagnostic;
 async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
   const debugPayload = { action: 'submitQueryDefinitionRun', sql };
+  logRemoteStep('query_definition:authorize:start', {
+    endpoint: window.location.pathname + '?api=1',
+    payload: { action: 'authorizeQueryRun', sql }
+  });
+  const authorize = await postApi({ action: 'authorizeQueryRun', sql });
+  logRemoteStep('query_definition:authorize:response', {
+    status: authorize.res.status,
+    ok: authorize.res.ok,
+    body: authorize.raw
+  });
+  if (!authorize.json) {
+    throw new Error(`authorizeQueryRun returned HTTP ${authorize.res.status} ${authorize.res.statusText}. Response starts with: ${authorize.raw.slice(0, 160)}`);
+  }
+  if (!authorize.json.ok) {
+    const details = authorize.json.error?.details || {};
+    const parts = [authorize.json.error?.message || 'authorizeQueryRun failed.'];
+    if (details.step) parts.push(`Step: ${details.step}`);
+    if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
+    throw new Error(parts.join(' | '));
+  }
   startRemoteRunUi('queued', 'Submitting query to SFMC...');
   logRemoteStep('query_definition:sql', sql);
   logRemoteStep('query_definition:start', {
