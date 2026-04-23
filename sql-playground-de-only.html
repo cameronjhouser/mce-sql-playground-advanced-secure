@@ -4807,6 +4807,15 @@ function extractRemoteSqlReferences(sql) {
   return refs;
 }
 
+function shouldPreflightRemotePolicy(sql) {
+  const refs = extractRemoteSqlReferences(sql);
+  if (!refs.length) return false;
+  return refs.some(ref => {
+    const name = String(ref && ref.name ? ref.name : '');
+    return !(name.startsWith('QP_SRC_') || name.startsWith('QP_RES_') || name.startsWith('QP_QRY_'));
+  });
+}
+
 function shouldRunRemoteQuery(sql) {
   const refs = [];
   const re = /\b(?:from|join)\s+((?:ENT\.)?\[[^\]]+\]|(?:ENT\.)?[A-Za-z_][A-Za-z0-9_]*|_[A-Za-z][A-Za-z0-9_]*)/gi;
@@ -4929,25 +4938,27 @@ window.runRetentionDiagnostic = runRetentionDiagnostic;
 async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
   const debugPayload = { action: 'submitQueryDefinitionRun', sql };
-  logRemoteStep('query_definition:authorize:start', {
-    endpoint: window.location.pathname + '?api=1',
-    payload: { action: 'authorizeQueryRun', sql }
-  });
-  const authorize = await postApi({ action: 'authorizeQueryRun', sql });
-  logRemoteStep('query_definition:authorize:response', {
-    status: authorize.res.status,
-    ok: authorize.res.ok,
-    body: authorize.raw
-  });
-  if (!authorize.json) {
-    throw new Error(`authorizeQueryRun returned HTTP ${authorize.res.status} ${authorize.res.statusText}. Response starts with: ${authorize.raw.slice(0, 160)}`);
-  }
-  if (!authorize.json.ok) {
-    const details = authorize.json.error?.details || {};
-    const parts = [authorize.json.error?.message || 'authorizeQueryRun failed.'];
-    if (details.step) parts.push(`Step: ${details.step}`);
-    if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
-    throw new Error(parts.join(' | '));
+  if (shouldPreflightRemotePolicy(sql)) {
+    logRemoteStep('query_definition:authorize:start', {
+      endpoint: window.location.pathname + '?api=1',
+      payload: { action: 'authorizeQueryRun', sql }
+    });
+    const authorize = await postApi({ action: 'authorizeQueryRun', sql });
+    logRemoteStep('query_definition:authorize:response', {
+      status: authorize.res.status,
+      ok: authorize.res.ok,
+      body: authorize.raw
+    });
+    if (!authorize.json) {
+      throw new Error(`authorizeQueryRun returned HTTP ${authorize.res.status} ${authorize.res.statusText}. Response starts with: ${authorize.raw.slice(0, 160)}`);
+    }
+    if (!authorize.json.ok) {
+      const details = authorize.json.error?.details || {};
+      const parts = [authorize.json.error?.message || 'authorizeQueryRun failed.'];
+      if (details.step) parts.push(`Step: ${details.step}`);
+      if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
+      throw new Error(parts.join(' | '));
+    }
   }
   startRemoteRunUi('queued', 'Submitting query to SFMC...');
   logRemoteStep('query_definition:sql', sql);
