@@ -875,21 +875,36 @@ function getPolicyIdentityFallbackForSession(identity, businessUnitId) {
 
 function getPolicyPermissions(policies) {
   var permissions = {
+    canUseENT: false,
+    canUseDataViews: false,
     canCreateTempDE: false,
-    canDownloadData: false
+    canDownloadData: false,
+    isAdmin: false,
+    allowedPatterns: []
   };
   if (!policies || !policies.length) return permissions;
   for (var i = 0; i < policies.length; i++) {
     var policy = policies[i];
     if (!isTruthySecurityValue(policy.Active)) continue;
     if (isTruthySecurityValue(policy.IsAdmin)) {
+      permissions.canUseENT = true;
+      permissions.canUseDataViews = true;
       permissions.canCreateTempDE = true;
       permissions.canDownloadData = true;
+      permissions.isAdmin = true;
+      permissions.allowedPatterns = ["*"];
       return permissions;
     }
+    if (isTruthySecurityValue(policy.CanUseENT)) permissions.canUseENT = true;
+    if (isTruthySecurityValue(policy.CanUseDataViews)) permissions.canUseDataViews = true;
     if (isTruthySecurityValue(policy.CanCreateTempDE)) permissions.canCreateTempDE = true;
     if (isTruthySecurityValue(policy.CanDownloadData)) permissions.canDownloadData = true;
+    var pattern = ssjsTrim(String(policy.AllowedDEPattern || "*"));
+    if (pattern && permissions.allowedPatterns.join("|").indexOf(pattern) < 0) {
+      permissions.allowedPatterns.push(pattern);
+    }
   }
+  if (!permissions.allowedPatterns.length) permissions.allowedPatterns.push("*");
   return permissions;
 }
 
@@ -2298,9 +2313,13 @@ if (isApiRequest) {
       emailAddress: authContext.emailAddress || "",
       userDisplayName: authContext.userDisplayName || "",
       permissions: authPermissions,
+      canUseENT: authPermissions.canUseENT,
+      canUseDataViews: authPermissions.canUseDataViews,
       canRunRemoteQueries: isLoggedIn,
       canCreateTempDE: authPermissions.canCreateTempDE,
       canDownloadData: authPermissions.canDownloadData,
+      allowedPatterns: authPermissions.allowedPatterns || ["*"],
+      isAdmin: !!authPermissions.isAdmin,
       policyMatchCount: authPolicies ? authPolicies.length : 0,
       policySummary: getSecurityPolicySummary(authContext, authPolicies),
       hasDisplayIdentity: !!(authContext.userDisplayName || authContext.userName || authContext.emailAddress),
@@ -4207,9 +4226,13 @@ let sqlDb = null;
 let loadedDEs = {};
 let authState = {
   authenticated: false,
+  canUseENT: false,
+  canUseDataViews: false,
   canRunRemoteQueries: false,
   canCreateTempDE: false,
-  canDownloadData: false
+  canDownloadData: false,
+  allowedPatterns: ['*'],
+  isAdmin: false
 };
 
 function quoteSqlIdentifier(name) {
@@ -4816,6 +4839,40 @@ function shouldPreflightRemotePolicy(sql) {
   });
 }
 
+function wildcardPatternToRegExp(pattern) {
+  const text = String(pattern || '*');
+  const escaped = text.replace(/([.+^${}()|[\]\\])/g, '\\$1').replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
+function isTempRemoteReference(ref) {
+  const name = String(ref && ref.name ? ref.name : '');
+  return name.startsWith('QP_SRC_') || name.startsWith('QP_RES_') || name.startsWith('QP_QRY_');
+}
+
+function validateRemoteQueryAgainstAuthState(sql) {
+  const refs = extractRemoteSqlReferences(sql);
+  if (!refs.length) return { ok: true };
+  if (authState.isAdmin) return { ok: true };
+  const patterns = (authState.allowedPatterns && authState.allowedPatterns.length ? authState.allowedPatterns : ['*'])
+    .map(p => String(p || '*'));
+
+  for (const ref of refs) {
+    if (isTempRemoteReference(ref)) continue;
+    if (ref.type === 'ENT_DATA_EXTENSION' && !authState.canUseENT) {
+      return { ok: false, message: `Access blocked by playground policy for object: ${ref.raw}` };
+    }
+    if (ref.type === 'DATA_VIEW' && !authState.canUseDataViews) {
+      return { ok: false, message: `Access blocked by playground policy for object: ${ref.raw}` };
+    }
+    if (!patterns.some(pattern => wildcardPatternToRegExp(pattern).test(ref.name))) {
+      return { ok: false, message: `Access blocked by playground policy for object: ${ref.raw}` };
+    }
+  }
+
+  return { ok: true };
+}
+
 function shouldRunRemoteQuery(sql) {
   const refs = [];
   const re = /\b(?:from|join)\s+((?:ENT\.)?\[[^\]]+\]|(?:ENT\.)?[A-Za-z_][A-Za-z0-9_]*|_[A-Za-z][A-Za-z0-9_]*)/gi;
@@ -4850,9 +4907,13 @@ async function loadAuthStatus() {
     const data = response.json && response.json.ok ? response.json.data : null;
     authState = {
       authenticated: !!(data && data.authenticated),
+      canUseENT: !!(data && data.canUseENT),
+      canUseDataViews: !!(data && data.canUseDataViews),
       canRunRemoteQueries: !!(data && data.canRunRemoteQueries),
       canCreateTempDE: !!(data && data.canCreateTempDE),
-      canDownloadData: !!(data && data.canDownloadData)
+      canDownloadData: !!(data && data.canDownloadData),
+      allowedPatterns: data && Array.isArray(data.allowedPatterns) && data.allowedPatterns.length ? data.allowedPatterns : ['*'],
+      isAdmin: !!(data && data.isAdmin)
     };
     updateDownloadButtons((tabs.find(t => t.id === activeTabId)?.results || {}).csvData);
     Object.keys(loadedDEs).forEach(name => updateDEUI(name, loadedDEs[name].columns, loadedDEs[name].rowCount));
@@ -4905,9 +4966,13 @@ async function loadAuthStatus() {
   } catch (err) {
     authState = {
       authenticated: false,
+      canUseENT: false,
+      canUseDataViews: false,
       canRunRemoteQueries: false,
       canCreateTempDE: false,
-      canDownloadData: false
+      canDownloadData: false,
+      allowedPatterns: ['*'],
+      isAdmin: false
     };
     updateDownloadButtons((tabs.find(t => t.id === activeTabId)?.results || {}).csvData);
     if (loginLink) loginLink.style.display = 'none';
@@ -4939,25 +5004,16 @@ async function runRemoteQueryDefinition(sql, options = {}) {
   const resultFormat = options.resultFormat === 'rows' ? 'rows' : 'table';
   const debugPayload = { action: 'submitQueryDefinitionRun', sql };
   if (shouldPreflightRemotePolicy(sql)) {
-    logRemoteStep('query_definition:authorize:start', {
-      endpoint: window.location.pathname + '?api=1',
-      payload: { action: 'authorizeQueryRun', sql }
+    const localPolicyCheck = validateRemoteQueryAgainstAuthState(sql);
+    logRemoteStep('query_definition:authorize:client', {
+      ok: localPolicyCheck.ok,
+      message: localPolicyCheck.message || '',
+      canUseENT: authState.canUseENT,
+      canUseDataViews: authState.canUseDataViews,
+      allowedPatterns: authState.allowedPatterns || ['*']
     });
-    const authorize = await postApi({ action: 'authorizeQueryRun', sql });
-    logRemoteStep('query_definition:authorize:response', {
-      status: authorize.res.status,
-      ok: authorize.res.ok,
-      body: authorize.raw
-    });
-    if (!authorize.json) {
-      throw new Error(`authorizeQueryRun returned HTTP ${authorize.res.status} ${authorize.res.statusText}. Response starts with: ${authorize.raw.slice(0, 160)}`);
-    }
-    if (!authorize.json.ok) {
-      const details = authorize.json.error?.details || {};
-      const parts = [authorize.json.error?.message || 'authorizeQueryRun failed.'];
-      if (details.step) parts.push(`Step: ${details.step}`);
-      if (details.object && details.object.raw) parts.push(`Object: ${details.object.raw}`);
-      throw new Error(parts.join(' | '));
+    if (!localPolicyCheck.ok) {
+      throw new Error(localPolicyCheck.message || 'Query blocked by playground policy.');
     }
   }
   startRemoteRunUi('queued', 'Submitting query to SFMC...');
